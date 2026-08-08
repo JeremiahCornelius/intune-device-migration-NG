@@ -24,7 +24,7 @@
     different Entra identity and having that SID applied to the existing profile.
 
 .NOTES
-    Safety-first fork revision: 2026.08.07.1
+    Safety-first fork revision: 2026.08.07.3
 #>
 
 [CmdletBinding()]
@@ -180,6 +180,38 @@ try {
         Write-MigrationLog OK 'No standard pending-reboot indicators were found.'
     }
 
+    # Validate the requested post-migration BitLocker disposition before any
+    # destructive migration step can begin. DECRYPT is retained only as an
+    # explicit legacy escape hatch because disabling protection is destructive.
+    $bitLockerMode = [string](Get-OptionalPropertyValue -InputObject $config -Name 'bitlocker')
+    if ([string]::IsNullOrWhiteSpace($bitLockerMode)) {
+        Write-MigrationLog WARN 'No post-migration BitLocker action is configured.'
+    }
+    else {
+        switch ($bitLockerMode.ToUpperInvariant()) {
+            'MIGRATE' {
+                Write-MigrationLog OK 'BitLocker post-migration action is MIGRATE.'
+            }
+
+            'DECRYPT' {
+                $allowBitLockerDecrypt = Get-SafetyBoolean `
+                    -Config $config `
+                    -Name 'allowBitLockerDecrypt' `
+                    -Default $false
+
+                if (-not $allowBitLockerDecrypt) {
+                    throw 'BitLocker DECRYPT requires explicit config safety.allowBitLockerDecrypt=true.'
+                }
+
+                Write-MigrationLog WARN 'BitLocker DECRYPT is explicitly permitted by safety.allowBitLockerDecrypt=true.'
+            }
+
+            default {
+                throw "Unsupported config bitlocker value '$bitLockerMode'. Expected MIGRATE, DECRYPT, or an empty value."
+            }
+        }
+    }
+
     $ppkg = Get-SingleProvisioningPackage -SearchRoot $PSScriptRoot
     $ppkgHash = (Get-FileHash -LiteralPath $ppkg.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
     Write-MigrationLog OK "Exactly one provisioning package is staged: $($ppkg.Name), SHA-256=$ppkgHash."
@@ -197,7 +229,7 @@ try {
         Write-MigrationLog WARN 'No config safety.ppkgSha256 pin is configured. The observed package hash is recorded in preflight state and must remain unchanged through commit.'
     }
 
-    foreach ($requiredFile in @('reboot.xml','postMigrate.xml','reboot.ps1','postMigrate.ps1','Migration.Common.ps1')) {
+    foreach ($requiredFile in @('reboot.xml','postMigrate.xml','reboot.ps1','postMigrate.ps1','postMigrateUser.ps1','Migration.Common.ps1')) {
         $requiredPath = Join-Path -Path $PSScriptRoot -ChildPath $requiredFile
         if (-not (Test-Path -LiteralPath $requiredPath)) {
             throw "Required migration package file is missing: $requiredFile"

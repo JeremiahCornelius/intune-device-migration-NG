@@ -21,14 +21,15 @@
     but deliberately removes the 8.1 runas.exe fallback.
 
     The logon-triggered postMigrate task is not armed until ChangeOwner and
-    profile ownership read-back succeed. This prevents post-migration actions
-    from running against an incomplete first-boot transition.
+    profile ownership read-back succeed. A separate secret-free user task is
+    also armed for the deterministic Entra SID so AzureAdPrt can be verified in
+    the actual user's context before the SYSTEM finalizer declares completion.
 
     On any safety failure:
       - the password credential provider is restored;
       - auto-logon plaintext is removed;
       - the reboot task remains disabled to prevent loops;
-      - any postMigrate task is kept disabled;
+      - all post-migration verification/finalization tasks are kept disabled;
       - Safety\State is set to RecoveryRequired;
       - the machine does NOT automatically reboot.
 
@@ -97,15 +98,106 @@ function Disable-PostMigrationTaskBestEffort {
     [CmdletBinding()]
     param()
 
-    try {
-        $task = Get-ScheduledTask -TaskName 'postMigrate' -ErrorAction SilentlyContinue
-        if ($task) {
-            Disable-ScheduledTask -TaskName 'postMigrate' -ErrorAction SilentlyContinue | Out-Null
+    foreach ($taskName in @('postMigrate','postMigrateUserVerify')) {
+        try {
+            $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            if ($task) {
+                Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
+        catch {
+            # Recovery safeguard only; preserve the original migration failure.
         }
     }
-    catch {
-        # Recovery safeguard only; preserve the original migration failure.
+}
+
+function Register-PostMigrationUserVerificationTask {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ExpectedSid
+    )
+
+    if ($ExpectedSid -notmatch '^S-1-12-1-(\d+-){2,}\d+$') {
+        throw "Expected user SID '$ExpectedSid' is not an Entra cloud SID."
     }
+
+    $sourceProbe = Join-Path -Path ([string]$config.localPath) -ChildPath 'postMigrateUser.ps1'
+    if (-not (Test-Path -LiteralPath $sourceProbe -PathType Leaf)) {
+        throw "Required user-context post-migration probe is missing: '$sourceProbe'."
+    }
+
+    # config.json and the provisioning package remain in the SYSTEM/Admin-only
+    # migration staging directory. Copy ONLY the secret-free probe to a separate
+    # path readable/executable by the exact expected Entra SID.
+    $probeRoot = 'C:\ProgramData\IntuneMigrationUserProbe'
+    $probePath = Join-Path -Path $probeRoot -ChildPath 'postMigrateUser.ps1'
+
+    if (-not (Test-Path -LiteralPath $probeRoot)) {
+        New-Item -Path $probeRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    Copy-Item `
+        -LiteralPath $sourceProbe `
+        -Destination $probePath `
+        -Force `
+        -ErrorAction Stop
+
+    & "$env:SystemRoot\System32\icacls.exe" `
+        $probeRoot `
+        '/inheritance:r' `
+        '/grant:r' `
+        '*S-1-5-18:(OI)(CI)F' `
+        '*S-1-5-32-544:(OI)(CI)F' `
+        "*${ExpectedSid}:(OI)(CI)RX" `
+        '/T' `
+        '/C' | Out-Null
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to apply the restricted user-probe ACL to '$probeRoot'."
+    }
+
+    $sourceHash = (Get-FileHash -LiteralPath $sourceProbe -Algorithm SHA256 -ErrorAction Stop).Hash
+    $probeHash = (Get-FileHash -LiteralPath $probePath -Algorithm SHA256 -ErrorAction Stop).Hash
+
+    if ($sourceHash -ne $probeHash) {
+        throw 'User-context PRT probe hash changed during staging.'
+    }
+
+    $powerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $argument = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $probePath
+
+    $action = New-ScheduledTaskAction `
+        -Execute $powerShellExe `
+        -Argument $argument
+
+    $trigger = New-ScheduledTaskTrigger `
+        -AtLogOn `
+        -User $ExpectedSid
+
+    # TASK_LOGON_INTERACTIVE_TOKEN uses the expected user's existing interactive
+    # token. No password is stored and no privileged credential crosses the user
+    # boundary.
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId $ExpectedSid `
+        -LogonType Interactive `
+        -RunLevel Limited
+
+    Register-ScheduledTask `
+        -TaskName 'postMigrateUserVerify' `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Description 'NG migration user-context Microsoft Entra PRT verification probe.' `
+        -Force `
+        -ErrorAction Stop | Out-Null
+
+    $task = Get-ScheduledTask -TaskName 'postMigrateUserVerify' -ErrorAction Stop
+    if (-not $task) {
+        throw 'postMigrateUserVerify task was not observable after registration.'
+    }
+
+    Write-MigrationLog OK "User-context PRT verification task armed for expected SID '$ExpectedSid'."
 }
 
 function Register-PostMigrationTask {
@@ -510,8 +602,10 @@ namespace UserProfile {
         -Caption "Welcome to $tenantLabel" `
         -Text "Sign in with your Microsoft Entra account: $expectedUpn"
 
-    # The logon-triggered post-migration phase is intentionally armed only after
-    # ChangeOwner and its profile-path/SID read-back have succeeded.
+    # Arm the exact-user PRT probe first, then the delayed SYSTEM finalizer.
+    # If either task cannot be registered, this boot phase fails closed and
+    # refuses the second reboot.
+    Register-PostMigrationUserVerificationTask -ExpectedSid $expectedNewSid
     Register-PostMigrationTask
 
     Set-MigrationSafetyState -Values @{

@@ -44,9 +44,10 @@
     to fail closed and preserve a local recovery path; they do not turn this
     workflow into a Microsoft-supported conversion method.
 
-    This commit intentionally does not redesign postMigrate.ps1. Server-side
-    stale-object cleanup, post-enrollment verification, BitLocker handling,
-    group targeting, and Autopilot decisions belong in a later atomic commit.
+    Post-migration verification is delegated to the hardened postMigrate.ps1
+    finalizer and its secret-free user-context PRT probe. Server-side stale-object
+    cleanup, group-tag mutation, and Autopilot lifecycle changes remain deferred
+    to later atomic commits after lab evidence confirms same-tenant behavior.
 
     Derived conceptually from:
       stevecapacity/intune-device-migration-8 (GPLv3)
@@ -69,7 +70,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ControllerRevision = '2026.08.07.2'
+$script:ControllerRevision = '2026.08.07.3'
 $script:IrreversibleBoundaryCrossed = $false
 $script:TranscriptStarted = $false
 $script:RegisteredTaskNames = @()
@@ -474,9 +475,8 @@ function Assert-RequiredPayloadFiles {
         'reboot.ps1',
         'reboot.xml',
         'postMigrate.ps1',
-        'postMigrate.xml',
-        'groupTag.ps1',
-        'groupTag.xml'
+        'postMigrateUser.ps1',
+        'postMigrate.xml'
     )
 
     foreach ($name in $required) {
