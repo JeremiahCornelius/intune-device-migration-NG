@@ -20,10 +20,15 @@
     It incorporates the useful 8.1 idea of waiting for CreateProfile materialization
     but deliberately removes the 8.1 runas.exe fallback.
 
+    The logon-triggered postMigrate task is not armed until ChangeOwner and
+    profile ownership read-back succeed. This prevents post-migration actions
+    from running against an incomplete first-boot transition.
+
     On any safety failure:
       - the password credential provider is restored;
       - auto-logon plaintext is removed;
       - the reboot task remains disabled to prevent loops;
+      - any postMigrate task is kept disabled;
       - Safety\State is set to RecoveryRequired;
       - the machine does NOT automatically reboot.
 
@@ -88,6 +93,45 @@ function Set-LoginNotice {
     New-ItemProperty -Path $policyPath -Name 'legalnoticetext' -Value $Text -PropertyType String -Force | Out-Null
 }
 
+function Disable-PostMigrationTaskBestEffort {
+    [CmdletBinding()]
+    param()
+
+    try {
+        $task = Get-ScheduledTask -TaskName 'postMigrate' -ErrorAction SilentlyContinue
+        if ($task) {
+            Disable-ScheduledTask -TaskName 'postMigrate' -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+    catch {
+        # Recovery safeguard only; preserve the original migration failure.
+    }
+}
+
+function Register-PostMigrationTask {
+    [CmdletBinding()]
+    param()
+
+    $xmlPath = Join-Path -Path ([string]$config.localPath) -ChildPath 'postMigrate.xml'
+    if (-not (Test-Path -LiteralPath $xmlPath)) {
+        throw "Required post-migration task XML is missing: '$xmlPath'."
+    }
+
+    $xml = Get-Content -LiteralPath $xmlPath -Raw -ErrorAction Stop
+    Register-ScheduledTask `
+        -TaskName 'postMigrate' `
+        -Xml $xml `
+        -Force `
+        -ErrorAction Stop | Out-Null
+
+    $task = Get-ScheduledTask -TaskName 'postMigrate' -ErrorAction Stop
+    if (-not $task) {
+        throw 'postMigrate task was not observable after registration.'
+    }
+
+    Write-MigrationLog OK 'postMigrate task armed only after verified profile reassociation.'
+}
+
 function Fail-ProfileTransition {
     [CmdletBinding()]
     param(
@@ -95,6 +139,7 @@ function Fail-ProfileTransition {
     )
 
     Write-MigrationLog ERROR $Message
+    Disable-PostMigrationTaskBestEffort
 
     try {
         Restore-InteractiveLogonSafety
@@ -464,6 +509,10 @@ namespace UserProfile {
     Set-LoginNotice `
         -Caption "Welcome to $tenantLabel" `
         -Text "Sign in with your Microsoft Entra account: $expectedUpn"
+
+    # The logon-triggered post-migration phase is intentionally armed only after
+    # ChangeOwner and its profile-path/SID read-back have succeeded.
+    Register-PostMigrationTask
 
     Set-MigrationSafetyState -Values @{
         State = 'ProfileReassociated'
