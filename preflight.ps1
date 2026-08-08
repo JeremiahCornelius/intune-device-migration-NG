@@ -24,7 +24,7 @@
     different Entra identity and having that SID applied to the existing profile.
 
 .NOTES
-    Safety-first fork revision: 2026.08.07.3
+    Safety-first fork revision: 2026.08.07.4
 #>
 
 [CmdletBinding()]
@@ -71,6 +71,27 @@ try {
 
     $config = Get-MigrationConfig -Path $ConfigPath
     $configHash = Get-ConfigFileSha256 -Path $ConfigPath
+
+    # Pin operator intent before resolving any Windows/Entra identity.  The
+    # source UPN is not used to discover the profile; it is a fail-closed
+    # assertion that the SID-resolved Entra user is the person intended for
+    # this migration run.
+    $safety = Get-OptionalPropertyValue -InputObject $config -Name 'safety'
+    $expectedSourceUpn = [string](
+        Get-OptionalPropertyValue `
+            -InputObject $safety `
+            -Name 'expectedSourceUserPrincipalName'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($expectedSourceUpn)) {
+        throw 'config safety.expectedSourceUserPrincipalName is required.'
+    }
+
+    $expectedSourceUpn = $expectedSourceUpn.Trim()
+    if ($expectedSourceUpn -notmatch '^[^@\s]+@[^@\s]+$') {
+        throw "config safety.expectedSourceUserPrincipalName '$expectedSourceUpn' is not in user@domain form."
+    }
+
     $localPath = [string]$config.localPath
 
     if ([string]::IsNullOrWhiteSpace($localPath)) {
@@ -113,6 +134,23 @@ try {
         throw "The source user profile isn't currently loaded. Run staging while the intended user is signed in."
     }
 
+    # Multiple dormant local profiles are permitted, but the actively selected
+    # migration identity must not itself be a local account.  SYSTEM remains the
+    # executor; the interactive domain identity supplies the immutable source SID.
+    $localInteractiveAccount = @(
+        Get-LocalUser -ErrorAction Stop |
+            Where-Object {
+                $_.SID -and
+                [string]$_.SID.Value -eq [string]$interactiveUser.Sid
+            }
+    )
+
+    if ($localInteractiveAccount.Count -gt 0) {
+        throw "Interactive identity '$($interactiveUser.UserName)' resolves to local account '$($localInteractiveAccount[0].Name)'. Sign in as the intended synchronized AD domain user before preflight."
+    }
+
+    Write-MigrationLog OK 'Interactive source SID does not belong to a local Windows account.'
+
     # Authenticate using the existing upstream app-registration model, but keep
     # all credentials in SYSTEM context.  Nothing is copied to Public Documents.
     $sourceSession = New-GraphAppSession -TenantConfig $config.sourceTenant
@@ -143,6 +181,12 @@ try {
         -Headers $targetSession.Headers
 
     Write-MigrationLog OK "Deterministic Entra identity mapping succeeded: $($interactiveUser.Sid) -> $($entraUser.CloudSid) ($($entraUser.UserPrincipalName))."
+
+    if ([string]$entraUser.UserPrincipalName -ine $expectedSourceUpn) {
+        throw "Resolved Entra user '$($entraUser.UserPrincipalName)' does not match configured safety.expectedSourceUserPrincipalName '$expectedSourceUpn'. Refusing to migrate a valid but unintended synchronized user."
+    }
+
+    Write-MigrationLog OK "Configured source-user intent matches the SID-resolved Entra identity: $expectedSourceUpn."
 
     if ($interactiveUser.Sid -eq $entraUser.CloudSid) {
         throw 'Old AD SID and new Entra SID are unexpectedly identical.'
@@ -216,7 +260,6 @@ try {
     $ppkgHash = (Get-FileHash -LiteralPath $ppkg.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
     Write-MigrationLog OK "Exactly one provisioning package is staged: $($ppkg.Name), SHA-256=$ppkgHash."
 
-    $safety = Get-OptionalPropertyValue -InputObject $config -Name 'safety'
     $expectedPpkgHash = [string](Get-OptionalPropertyValue -InputObject $safety -Name 'ppkgSha256')
     if (-not [string]::IsNullOrWhiteSpace($expectedPpkgHash)) {
         if ($ppkgHash -ne $expectedPpkgHash.ToLowerInvariant()) {
@@ -253,6 +296,7 @@ try {
         OldSid = $interactiveUser.Sid
         ExpectedNewSid = $entraUser.CloudSid
         ExpectedUserObjectId = $entraUser.Id
+        ExpectedSourceUserPrincipalName = $expectedSourceUpn
         ExpectedUserPrincipalName = $entraUser.UserPrincipalName
         ExpectedProfilePath = $interactiveUser.ProfilePath
         RecoveryAccountName = $recoveryAccount.Name
@@ -279,9 +323,11 @@ try {
         }
         sourceUser = [ordered]@{
             windowsName = $interactiveUser.UserName
+            expectedUserPrincipalName = $expectedSourceUpn
             oldSid = $interactiveUser.Sid
             profilePath = $interactiveUser.ProfilePath
             profileLoaded = $interactiveUser.ProfileLoaded
+            localAccount = $false
         }
         targetUser = [ordered]@{
             objectId = $entraUser.Id

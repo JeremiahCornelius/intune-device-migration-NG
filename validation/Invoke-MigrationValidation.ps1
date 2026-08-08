@@ -47,10 +47,10 @@
       JeremiahCornelius/intune-device-migration-NG
 
     Harness version:
-      0.1.0
+      0.1.1
 
     Initial code baseline targeted by this harness:
-      555155f95488dd1231326910065514b8ba78e643
+      cb99741e962c5c8c1a3cd40f8c1614ad3523b72e
 
     This migration technique remains outside Microsoft's supported
     Hybrid-to-Entra in-place conversion path.  The harness measures observed
@@ -100,7 +100,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:HarnessVersion = '0.1.0'
+$script:HarnessVersion = '0.1.1'
 $script:SchemaVersion = '1.0'
 $script:SnapshotSchemaUri = 'https://raw.githubusercontent.com/JeremiahCornelius/intune-device-migration-NG/main/validation/schemas/migration-validation-snapshot.schema.json'
 $script:ComparisonSchemaUri = 'https://raw.githubusercontent.com/JeremiahCornelius/intune-device-migration-NG/main/validation/schemas/migration-validation-comparison.schema.json'
@@ -282,6 +282,7 @@ function Get-RedactedConfigEvidence {
             [string](Get-OptionalPropertyValue -InputObject $targetTenant -Name 'tenantName')
         )
         safety = [pscustomobject][ordered]@{
+            expectedSourceUserPrincipalName = [string](Get-OptionalPropertyValue -InputObject $safety -Name 'expectedSourceUserPrincipalName')
             requireOneDriveKfmReady = Get-OptionalPropertyValue -InputObject $safety -Name 'requireOneDriveKfmReady'
             allowPendingReboot = Get-OptionalPropertyValue -InputObject $safety -Name 'allowPendingReboot'
             maxPreflightAgeMinutes = Get-OptionalPropertyValue -InputObject $safety -Name 'maxPreflightAgeMinutes'
@@ -465,6 +466,8 @@ function Get-InteractiveUserEvidence {
                 sid = $null
                 profilePath = $null
                 profileLoaded = $false
+                isLocalAccount = $null
+                localAccountName = $null
             }
         }
 
@@ -488,12 +491,25 @@ function Get-InteractiveUserEvidence {
                 Select-Object -First 1
         }
 
+        $localAccount = $null
+        if (-not [string]::IsNullOrWhiteSpace($sid)) {
+            $localAccount = @(
+                Get-LocalUser -ErrorAction Stop |
+                    Where-Object {
+                        $_.SID -and
+                        [string]$_.SID.Value -eq [string]$sid
+                    }
+            ) | Select-Object -First 1
+        }
+
         return [pscustomobject][ordered]@{
             present = $true
             windowsName = $name
             sid = $sid
             profilePath = if ($profile) { [string]$profile.LocalPath } else { $null }
             profileLoaded = if ($profile) { [bool]$profile.Loaded } else { $false }
+            isLocalAccount = [bool]($null -ne $localAccount)
+            localAccountName = if ($localAccount) { [string]$localAccount.Name } else { $null }
         }
     }
     catch {
@@ -503,6 +519,8 @@ function Get-InteractiveUserEvidence {
             sid = $null
             profilePath = $null
             profileLoaded = $false
+            isLocalAccount = $null
+            localAccountName = $null
             error = $_.Exception.Message
         }
     }
@@ -814,6 +832,7 @@ function Get-SafetyEvidence {
         'OldSid',
         'ExpectedNewSid',
         'ExpectedUserObjectId',
+        'ExpectedSourceUserPrincipalName',
         'ExpectedUserPrincipalName',
         'ExpectedProfilePath',
         'RecoveryAccountName',
@@ -1643,6 +1662,16 @@ function Add-BeforeChecks {
         Add-ValidationCheck -Id 'source.profileLoaded' -Status FAIL -Message 'An intended DOMAIN\user profile must be loaded before staging.' -Evidence $Context.interactiveUser.windowsName
     }
 
+    if ($Context.interactiveUser.isLocalAccount -eq $true) {
+        Add-ValidationCheck -Id 'source.interactiveDomainIdentity' -Status FAIL -Message 'The active migration identity resolves to a local Windows account.' -Evidence "$($Context.interactiveUser.windowsName) / $($Context.interactiveUser.localAccountName)"
+    }
+    elseif ($Context.interactiveUser.isLocalAccount -eq $false) {
+        Add-ValidationCheck -Id 'source.interactiveDomainIdentity' -Status PASS -Message 'The active migration identity does not resolve to a local Windows account.' -Evidence $Context.interactiveUser.windowsName
+    }
+    else {
+        Add-ValidationCheck -Id 'source.interactiveDomainIdentity' -Status WARN -Message 'Local-versus-domain classification of the active migration identity was not available.' -Evidence $Context.interactiveUser.windowsName
+    }
+
     $validSourceCertificates = @(
         $Context.intuneLocal.mdmCertificates |
             Where-Object { $_.isCertificate -eq $true }
@@ -1717,6 +1746,22 @@ function Add-BeforeChecks {
         Add-ValidationCheck -Id 'source.config' -Status FAIL -Message 'Migration config was not found.' -Evidence $Context.sourceArtifacts.config.path
     }
 
+    $expectedSourceUpn = [string](
+        Get-OptionalPropertyValue `
+            -InputObject $Context.sourceArtifacts.config.safety `
+            -Name 'expectedSourceUserPrincipalName'
+    )
+
+    if (
+        -not [string]::IsNullOrWhiteSpace($expectedSourceUpn) -and
+        $expectedSourceUpn -match '^[^@\s]+@[^@\s]+$'
+    ) {
+        Add-ValidationCheck -Id 'source.identityIntentConfigured' -Status PASS -Message 'An explicit expected source UPN is pinned in the execution configuration.' -Evidence $expectedSourceUpn
+    }
+    else {
+        Add-ValidationCheck -Id 'source.identityIntentConfigured' -Status FAIL -Message 'config safety.expectedSourceUserPrincipalName must contain the intended synchronized user UPN.' -Evidence $expectedSourceUpn
+    }
+
     $packages = @($Context.sourceArtifacts.provisioningPackages)
     if ($packages.Count -eq 1) {
         $expectedHash = [string](Get-OptionalPropertyValue -InputObject $Context.sourceArtifacts.config.safety -Name 'ppkgSha256')
@@ -1773,6 +1818,27 @@ function Add-BeforeChecks {
             Add-ValidationCheck -Id 'source.identityMapping' -Status FAIL -Message 'Deterministic Entra user SID mapping was not uniquely observable.' -Evidence $null
         }
 
+        $resolvedSourceUpn = $null
+        if ($Context.graph.user) {
+            $resolvedSourceUpn = [string](
+                Get-OptionalPropertyValue `
+                    -InputObject $Context.graph.user `
+                    -Name 'userPrincipalName'
+            )
+        }
+
+        if (
+            -not [string]::IsNullOrWhiteSpace($expectedSourceUpn) -and
+            $Context.graph.user -and
+            $Context.graph.user.count -eq 1 -and
+            $resolvedSourceUpn -ieq $expectedSourceUpn
+        ) {
+            Add-ValidationCheck -Id 'source.identityIntentMatch' -Status PASS -Message 'The SID-resolved Entra user matches the configured expected source UPN.' -Evidence $expectedSourceUpn
+        }
+        else {
+            Add-ValidationCheck -Id 'source.identityIntentMatch' -Status FAIL -Message 'The SID-resolved Entra user does not match the configured expected source UPN.' -Evidence "Configured=$expectedSourceUpn; Resolved=$resolvedSourceUpn"
+        }
+
         $sourceDeviceRecords = @(
             $Context.graph.entraDevices |
                 Where-Object { $_.queriedDeviceId -eq $Context.join.deviceId }
@@ -1824,6 +1890,7 @@ function Add-AfterChecks {
     $newSid = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedNewSid')
     $expectedProfile = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedProfilePath')
     $expectedUserId = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedUserObjectId')
+    $expectedSourceUpn = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedSourceUserPrincipalName')
     $expectedUpn = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedUserPrincipalName')
 
     if ($Context.execution.isAdministrator -or $Context.execution.isSystem) {
@@ -1831,6 +1898,17 @@ function Add-AfterChecks {
     }
     else {
         Add-ValidationCheck -Id 'execution.admin' -Status FAIL -Message 'Harness must run elevated or as LocalSystem.' -Evidence $Context.execution.identity
+    }
+
+    if (
+        -not [string]::IsNullOrWhiteSpace($expectedSourceUpn) -and
+        -not [string]::IsNullOrWhiteSpace($expectedUpn) -and
+        $expectedSourceUpn -ieq $expectedUpn
+    ) {
+        Add-ValidationCheck -Id 'after.identityIntentContinuity' -Status PASS -Message 'Persisted operator source-user intent matches the Entra UPN carried into post-migration verification.' -Evidence $expectedSourceUpn
+    }
+    else {
+        Add-ValidationCheck -Id 'after.identityIntentContinuity' -Status FAIL -Message 'Persisted source-user intent and resolved expected Entra UPN are missing or inconsistent.' -Evidence "Intent=$expectedSourceUpn; Resolved=$expectedUpn"
     }
 
     if (-not $Context.migrationSafety.present) {

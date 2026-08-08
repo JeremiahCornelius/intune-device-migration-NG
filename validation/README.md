@@ -1,4 +1,4 @@
-# Lab validation harness v0.1
+# Lab validation harness v0.1.1
 
 `Invoke-MigrationValidation.ps1` is the read-only evidence harness for destructive lab qualification of `intune-device-migration-NG`.
 
@@ -20,7 +20,7 @@ Capture source-state evidence and evaluate lab readiness:
     -OutputPath C:\NGLabEvidence\validation-before.json
 ```
 
-Run this from an elevated **64-bit Windows PowerShell 5.1** session while the intended source domain user is signed in and its profile is loaded.
+Run this from an elevated **64-bit Windows PowerShell 5.1** session while the intended synchronized AD domain user is signed in and its profile is loaded. The execution config must pin that identity with `safety.expectedSourceUserPrincipalName`; the harness fails if the active identity is local or if SID-based Graph resolution returns a different Entra UPN.
 
 The two manual-validation switches are assertions, not automated tests. Supply them only after actually testing the local recovery credential and the full-device recovery/snapshot method. If omitted, the harness records explicit warnings.
 
@@ -89,7 +89,8 @@ The harness records:
 
 - Windows build and execution context;
 - `dsregcmd /status` device state;
-- interactive source identity and profile path;
+- interactive source identity, local/domain classification, and profile path;
+- configured `safety.expectedSourceUserPrincipalName` operator intent and its match to SID-resolved Entra UPN;
 - relevant old/new `Win32_UserProfile` ownership;
 - Intune MDM certificate metadata;
 - local Intune enrollment IDs;
