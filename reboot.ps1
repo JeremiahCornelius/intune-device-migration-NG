@@ -467,7 +467,7 @@ namespace UserProfile {
             }
 
             if ($null -eq $verifiedNewProfile) {
-                Fail-ProfileTransition 'NEW_SID profile doesn't enumerate after ChangeOwner verification retries.'
+                Fail-ProfileTransition "NEW_SID profile doesn't enumerate after ChangeOwner verification retries."
             }
 
             if (([string]$verifiedNewProfile.LocalPath).TrimEnd('\') -ine $oldProfilePath.TrimEnd('\')) {
@@ -480,7 +480,7 @@ namespace UserProfile {
     }
 
     if (-not $alreadyTransferred) {
-        Fail-ProfileTransition 'Internal safety invariant failed: profile transfer wasn't verified.'
+        Fail-ProfileTransition "Internal safety invariant failed: profile transfer wasn't verified."
     }
 
     # Remove only registry identity records that explicitly reference OLD_SID.

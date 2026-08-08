@@ -110,7 +110,7 @@ try {
     Write-MigrationLog OK "Interactive source profile resolved: $($interactiveUser.UserName), SID=$($interactiveUser.Sid), Path=$($interactiveUser.ProfilePath)."
 
     if (-not $interactiveUser.ProfileLoaded) {
-        throw 'The source user profile isn't currently loaded. Run staging while the intended user is signed in.'
+        throw "The source user profile isn't currently loaded. Run staging while the intended user is signed in."
     }
 
     # Authenticate using the existing upstream app-registration model, but keep

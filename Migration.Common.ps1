@@ -231,14 +231,14 @@ function Get-JwtTenantId {
 
     $parts = $AccessToken.Split('.')
     if ($parts.Count -lt 2) {
-        throw 'Access token isn't a JWT.'
+        throw "Access token isn't a JWT."
     }
 
     $payload = ConvertFrom-Base64Url -Text $parts[1] | ConvertFrom-Json -ErrorAction Stop
     $tenantId = [string](Get-OptionalPropertyValue -InputObject $payload -Name 'tid')
 
     if ([string]::IsNullOrWhiteSpace($tenantId)) {
-        throw 'Access token doesn't contain a tid claim.'
+        throw "Access token doesn't contain a tid claim."
     }
 
     return $tenantId
@@ -322,7 +322,7 @@ function Resolve-SameTenantEntraUserByOnPremSid {
     $user = $users[0]
 
     if ([string]$user.onPremisesSecurityIdentifier -ne $OnPremSid) {
-        throw 'Graph returned a user whose on-premises SID doesn't exactly match the requested SID.'
+        throw "Graph returned a user whose on-premises SID doesn't exactly match the requested SID."
     }
 
     if ($user.onPremisesSyncEnabled -ne $true) {
