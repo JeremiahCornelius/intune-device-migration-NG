@@ -11,6 +11,7 @@ on:
       - 'startMigrate.ps1'
       - 'reboot.ps1'
       - 'postMigrate.ps1'
+      - 'postMigrateUser.ps1'
       - 'groupTag.ps1'
       - '.github/PSScriptAnalyzerSettings.psd1'
       - '.github/workflows/powershell-validation.yml'
@@ -22,6 +23,7 @@ on:
       - 'startMigrate.ps1'
       - 'reboot.ps1'
       - 'postMigrate.ps1'
+      - 'postMigrateUser.ps1'
       - 'groupTag.ps1'
       - '.github/PSScriptAnalyzerSettings.psd1'
       - '.github/workflows/powershell-validation.yml'
@@ -63,6 +65,7 @@ jobs:
               'startMigrate.ps1'
               'reboot.ps1'
               'postMigrate.ps1'
+              'postMigrateUser.ps1'
               'groupTag.ps1'
           )
 
@@ -191,6 +194,7 @@ jobs:
               'startMigrate.ps1'
               'reboot.ps1'
               'postMigrate.ps1'
+              'postMigrateUser.ps1'
               'groupTag.ps1'
           )
 
