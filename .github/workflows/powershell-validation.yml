@@ -14,6 +14,7 @@ on:
       - 'postMigrateUser.ps1'
       - 'groupTag.ps1'
       - 'validation/**'
+      - 'lab/**'
       - '.github/PSScriptAnalyzerSettings.psd1'
       - '.github/workflows/powershell-validation.yml'
   pull_request:
@@ -27,6 +28,7 @@ on:
       - 'postMigrateUser.ps1'
       - 'groupTag.ps1'
       - 'validation/**'
+      - 'lab/**'
       - '.github/PSScriptAnalyzerSettings.psd1'
       - '.github/workflows/powershell-validation.yml'
   workflow_dispatch:
@@ -70,6 +72,8 @@ jobs:
               'postMigrateUser.ps1'
               'groupTag.ps1'
               'validation/Invoke-MigrationValidation.ps1'
+              'lab/Build-NGLabExecutionBundle.ps1'
+              'lab/Test-NGLabExecutionBundle.ps1'
           )
 
           function ConvertTo-GitHubCommandValue {
@@ -200,6 +204,8 @@ jobs:
               'postMigrateUser.ps1'
               'groupTag.ps1'
               'validation/Invoke-MigrationValidation.ps1'
+              'lab/Build-NGLabExecutionBundle.ps1'
+              'lab/Test-NGLabExecutionBundle.ps1'
           )
 
           $settingsPath = Join-Path `
