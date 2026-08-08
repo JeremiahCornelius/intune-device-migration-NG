@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/JeremiahCornelius/intune-device-migration-NG/main/validation/schemas/migration-validation-snapshot.schema.json",
+  "title": "intune-device-migration-NG validation snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "harnessVersion",
+    "phase",
+    "capturedUtc",
+    "overallStatus",
+    "checks",
+    "evidence",
+    "security"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri"
+    },
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "harnessVersion": {
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "Before",
+        "After"
+      ]
+    },
+    "capturedUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "overallStatus": {
+      "enum": [
+        "PASS",
+        "PASS WITH WARNINGS",
+        "PENDING",
+        "FAIL",
+        "RECOVERY REQUIRED"
+      ]
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "message",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "PASS",
+              "WARN",
+              "FAIL",
+              "INFO"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": [
+        "execution",
+        "manualAssertions",
+        "system",
+        "join",
+        "interactiveUser",
+        "expectedProfiles",
+        "intuneLocal",
+        "backup",
+        "pendingReboot",
+        "timeSync",
+        "domainController",
+        "recovery",
+        "bitLocker",
+        "migrationSafety",
+        "userPrtEvidence",
+        "tasks",
+        "sensitiveResidue",
+        "sourceArtifacts",
+        "graph"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "execution": {
+          "type": "object"
+        },
+        "system": {
+          "type": "object"
+        },
+        "join": {
+          "type": "object"
+        },
+        "interactiveUser": {
+          "type": "object"
+        },
+        "expectedProfiles": {
+          "type": "object"
+        },
+        "intuneLocal": {
+          "type": "object"
+        },
+        "backup": {
+          "type": "object"
+        },
+        "pendingReboot": {
+          "type": "object"
+        },
+        "timeSync": {
+          "type": "object"
+        },
+        "domainController": {
+          "type": "object"
+        },
+        "recovery": {
+          "type": "object"
+        },
+        "bitLocker": {
+          "type": "object"
+        },
+        "migrationSafety": {
+          "type": "object"
+        },
+        "userPrtEvidence": {
+          "type": "object"
+        },
+        "tasks": {
+          "type": "array"
+        },
+        "sensitiveResidue": {
+          "type": "object"
+        },
+        "sourceArtifacts": {
+          "type": "object"
+        },
+        "graph": {
+          "type": "object"
+        },
+        "manualAssertions": {
+          "type": "object"
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reusableSecretsExported",
+        "accessTokensExported",
+        "bitLockerRecoveryPasswordsExported"
+      ],
+      "properties": {
+        "reusableSecretsExported": {
+          "const": false
+        },
+        "accessTokensExported": {
+          "const": false
+        },
+        "bitLockerRecoveryPasswordsExported": {
+          "const": false
+        }
+      }
+    }
+  }
+}

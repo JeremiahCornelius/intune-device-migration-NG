@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/JeremiahCornelius/intune-device-migration-NG/main/validation/schemas/migration-validation-comparison.schema.json",
+  "title": "intune-device-migration-NG validation comparison",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schemaVersion",
+    "harnessVersion",
+    "phase",
+    "capturedUtc",
+    "overallStatus",
+    "checks",
+    "inputs",
+    "transition",
+    "security"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri"
+    },
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "harnessVersion": {
+      "type": "string"
+    },
+    "phase": {
+      "const": "Compare"
+    },
+    "capturedUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "overallStatus": {
+      "enum": [
+        "PASS",
+        "PASS WITH WARNINGS",
+        "PENDING",
+        "FAIL",
+        "RECOVERY REQUIRED"
+      ]
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "message",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "PASS",
+              "WARN",
+              "FAIL",
+              "INFO"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "beforePath",
+        "beforeSha256",
+        "afterPath",
+        "afterSha256"
+      ],
+      "properties": {
+        "beforePath": {
+          "type": "string"
+        },
+        "beforeSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "afterPath": {
+          "type": "string"
+        },
+        "afterSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "computerName",
+        "profilePath",
+        "sid",
+        "entraDeviceId",
+        "managedDeviceId",
+        "afterMigrationState"
+      ]
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reusableSecretsExported",
+        "accessTokensExported",
+        "bitLockerRecoveryPasswordsExported"
+      ],
+      "properties": {
+        "reusableSecretsExported": {
+          "const": false
+        },
+        "accessTokensExported": {
+          "const": false
+        },
+        "bitLockerRecoveryPasswordsExported": {
+          "const": false
+        }
+      }
+    }
+  }
+}
