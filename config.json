@@ -17,6 +17,7 @@
     "SCCM": false,
     "safety": {
         "expectedSourceUserPrincipalName": "<user@domain.com>",
+        "intuneManagementNameSuffix": "<domain.tld>",
         "requireOneDriveKfmReady": true,
         "allowPendingReboot": false,
         "maxPreflightAgeMinutes": 60,

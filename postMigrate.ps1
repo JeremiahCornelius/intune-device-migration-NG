@@ -18,7 +18,13 @@
       - a Graph managedDevice matching that certificate and current DeviceId;
       - a post-commit Intune lastSyncDateTime;
       - acceptance of the deterministic primary-user assignment;
-      - successful configured BitLocker finalization.
+      - successful configured BitLocker finalization;
+      - preservation of the original physical Windows hostname.
+
+    After the core migration is verified, the finalizer best-effort labels the
+    verified Intune managedDevice with <original-hostname>.<configured-suffix>.
+    Failure of that administrative label is recorded as a warning and does not
+    convert an otherwise healthy migration into RecoveryRequired.
 
     This atomic phase deliberately does NOT:
       - delete the old server-side Intune managedDevice;
@@ -42,7 +48,7 @@
 
 .NOTES
     Derived from stevecapacity/intune-device-migration-8 (GPLv3).
-    NG safety-first revision: 2026.08.07.3
+    NG safety-first revision: 2026.08.08.1
 #>
 
 [CmdletBinding()]
@@ -472,7 +478,7 @@ function Wait-ForVerifiedIntuneEnrollment {
             }
 
             try {
-                $uri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$managedDeviceId?`$select=id,deviceName,managementAgent,enrolledDateTime,lastSyncDateTime,operatingSystem,azureADDeviceId,serialNumber"
+                $uri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$managedDeviceId?`$select=id,deviceName,managedDeviceName,managementAgent,enrolledDateTime,lastSyncDateTime,operatingSystem,azureADDeviceId,serialNumber"
 
                 $managedDevice = Invoke-RestMethod `
                     -Method GET `
@@ -569,6 +575,71 @@ function Set-ExpectedIntunePrimaryUser {
         -Body $body `
         -ContentType 'application/json' `
         -ErrorAction Stop | Out-Null
+}
+
+function Set-VerifiedIntuneManagementName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ManagedDeviceId,
+
+        [Parameter(Mandatory)]
+        [string]$CurrentEntraDeviceId,
+
+        [Parameter(Mandatory)]
+        [string]$ExpectedComputerName,
+
+        [Parameter(Mandatory)]
+        [string]$ExpectedManagementName,
+
+        [Parameter(Mandatory)]
+        [hashtable]$Headers
+    )
+
+    $requestedUtc = [DateTime]::UtcNow.ToString('o')
+    $uri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$ManagedDeviceId"
+    $body = @{
+        managedDeviceName = $ExpectedManagementName
+    } | ConvertTo-Json -Compress
+
+    Invoke-RestMethod `
+        -Method PATCH `
+        -Uri $uri `
+        -Headers $Headers `
+        -Body $body `
+        -ContentType 'application/json' `
+        -ErrorAction Stop | Out-Null
+
+    # Always perform a fresh read-back.  Do not trust the PATCH response as
+    # evidence that Intune persisted the administrative name on the intended
+    # managedDevice record.
+    $readbackUri = "${uri}?`$select=id,deviceName,managedDeviceName,azureADDeviceId,lastSyncDateTime"
+    $observed = Invoke-RestMethod `
+        -Method GET `
+        -Uri $readbackUri `
+        -Headers $Headers `
+        -ErrorAction Stop
+
+    if ([string]$observed.id -ne $ManagedDeviceId) {
+        throw "Intune management-name read-back returned managedDevice.id '$($observed.id)' instead of '$ManagedDeviceId'."
+    }
+
+    if ([string]$observed.azureADDeviceId -ne $CurrentEntraDeviceId) {
+        throw "Intune management-name read-back returned azureADDeviceId '$($observed.azureADDeviceId)' instead of current DeviceId '$CurrentEntraDeviceId'."
+    }
+
+    if ([string]$observed.managedDeviceName -ine $ExpectedManagementName) {
+        throw "Intune managedDeviceName read-back '$($observed.managedDeviceName)' does not exactly match requested '$ExpectedManagementName'."
+    }
+
+    return [pscustomobject]@{
+        RequestedUtc = $requestedUtc
+        VerifiedUtc = [DateTime]::UtcNow.ToString('o')
+        ObservedDeviceName = [string]$observed.deviceName
+        ObservedManagedDeviceName = [string]$observed.managedDeviceName
+        ObservedAzureAdDeviceId = [string]$observed.azureADDeviceId
+        PhysicalNameMatchesIntuneDeviceName = ([string]$observed.deviceName -ieq $ExpectedComputerName)
+    }
 }
 
 function Invoke-BitLockerFinalization {
@@ -743,7 +814,7 @@ try {
 
     $script:TranscriptStarted = $true
 
-    Write-PostMigrationLog INFO 'Starting NG verified post-migration finalizer revision 2026.08.07.3.'
+    Write-PostMigrationLog INFO 'Starting NG verified post-migration finalizer revision 2026.08.08.1.'
 
     $safetyState = Get-MigrationSafetyState
     $state = [string](Get-OptionalPropertyValue -InputObject $safetyState -Name 'State')
@@ -797,6 +868,20 @@ try {
     $expectedProfilePath = Get-RequiredSafetyString `
         -SafetyState $safetyState `
         -Name 'ExpectedProfilePath'
+
+    $expectedComputerName = Get-RequiredSafetyString `
+        -SafetyState $safetyState `
+        -Name 'ExpectedComputerName'
+
+    $expectedManagementName = Get-RequiredSafetyString `
+        -SafetyState $safetyState `
+        -Name 'ExpectedIntuneManagementName'
+
+    if ([string]$env:COMPUTERNAME -ine $expectedComputerName) {
+        Stop-WithRecoveryRequired "Physical Windows hostname changed during migration. Expected '$expectedComputerName'; observed '$env:COMPUTERNAME'."
+    }
+
+    Write-PostMigrationLog OK "Physical Windows hostname preserved as '$env:COMPUTERNAME'."
 
     $profileReassociatedUtc = ConvertTo-UtcDateTime `
         -Value (Get-RequiredSafetyString -SafetyState $safetyState -Name 'ProfileReassociatedUtc') `
@@ -952,6 +1037,39 @@ try {
 
     Write-PostMigrationLog OK "BitLocker post-migration action: $bitLockerAction."
 
+    $managementNameStatus = 'Warning'
+    $managementNameRequestedUtc = [DateTime]::UtcNow.ToString('o')
+    $managementNameVerifiedUtc = ''
+    $observedIntuneDeviceName = ''
+    $observedIntuneManagementName = ''
+    $managementNameWarning = ''
+
+    try {
+        $managementNameEvidence = Set-VerifiedIntuneManagementName `
+            -ManagedDeviceId $newManagedDeviceId `
+            -CurrentEntraDeviceId ([string]$dsreg.DeviceId) `
+            -ExpectedComputerName $expectedComputerName `
+            -ExpectedManagementName $expectedManagementName `
+            -Headers $graphSession.Headers
+
+        $managementNameStatus = 'Verified'
+        $managementNameRequestedUtc = [string]$managementNameEvidence.RequestedUtc
+        $managementNameVerifiedUtc = [string]$managementNameEvidence.VerifiedUtc
+        $observedIntuneDeviceName = [string]$managementNameEvidence.ObservedDeviceName
+        $observedIntuneManagementName = [string]$managementNameEvidence.ObservedManagedDeviceName
+
+        if (-not [bool]$managementNameEvidence.PhysicalNameMatchesIntuneDeviceName) {
+            $managementNameWarning = "Intune deviceName '$observedIntuneDeviceName' does not yet match preserved physical hostname '$expectedComputerName'."
+            Write-PostMigrationLog WARN $managementNameWarning
+        }
+
+        Write-PostMigrationLog OK "Intune managedDeviceName verified as '$observedIntuneManagementName'."
+    }
+    catch {
+        $managementNameWarning = $_.Exception.Message
+        Write-PostMigrationLog WARN "Migration core verification succeeded, but Intune managedDeviceName classification was not verified: $managementNameWarning"
+    }
+
     Set-MigrationSafetyState -Values @{
         State = 'IntuneReenrollmentVerified'
         IntuneReenrollmentVerifiedUtc = [DateTime]::UtcNow.ToString('o')
@@ -964,6 +1082,14 @@ try {
         ManagedDeviceIdReused = ($newManagedDeviceId -eq $oldManagedDeviceId)
         PrimaryUserAssignmentRequestedUtc = [DateTime]::UtcNow.ToString('o')
         BitLockerFinalization = $bitLockerAction
+        ExpectedComputerName = $expectedComputerName
+        ExpectedIntuneManagementName = $expectedManagementName
+        IntuneManagementNameStatus = $managementNameStatus
+        IntuneManagementNameRequestedUtc = $managementNameRequestedUtc
+        IntuneManagementNameVerifiedUtc = $managementNameVerifiedUtc
+        ObservedIntuneDeviceName = $observedIntuneDeviceName
+        ObservedIntuneManagementName = $observedIntuneManagementName
+        IntuneManagementNameWarning = $managementNameWarning
         ServerCleanupDeferred = $true
         AutopilotRegistrationDeferred = $true
         GroupTagMutationDeferred = $true

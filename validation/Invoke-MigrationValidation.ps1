@@ -47,10 +47,10 @@
       JeremiahCornelius/intune-device-migration-NG
 
     Harness version:
-      0.1.1
+      0.1.2
 
     Initial code baseline targeted by this harness:
-      cb99741e962c5c8c1a3cd40f8c1614ad3523b72e
+      101902dc7c423036def6f206c322a50474bb1bae
 
     This migration technique remains outside Microsoft's supported
     Hybrid-to-Entra in-place conversion path.  The harness measures observed
@@ -100,7 +100,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:HarnessVersion = '0.1.1'
+$script:HarnessVersion = '0.1.2'
 $script:SchemaVersion = '1.0'
 $script:SnapshotSchemaUri = 'https://raw.githubusercontent.com/JeremiahCornelius/intune-device-migration-NG/main/validation/schemas/migration-validation-snapshot.schema.json'
 $script:ComparisonSchemaUri = 'https://raw.githubusercontent.com/JeremiahCornelius/intune-device-migration-NG/main/validation/schemas/migration-validation-comparison.schema.json'
@@ -283,6 +283,7 @@ function Get-RedactedConfigEvidence {
         )
         safety = [pscustomobject][ordered]@{
             expectedSourceUserPrincipalName = [string](Get-OptionalPropertyValue -InputObject $safety -Name 'expectedSourceUserPrincipalName')
+            intuneManagementNameSuffix = [string](Get-OptionalPropertyValue -InputObject $safety -Name 'intuneManagementNameSuffix')
             requireOneDriveKfmReady = Get-OptionalPropertyValue -InputObject $safety -Name 'requireOneDriveKfmReady'
             allowPendingReboot = Get-OptionalPropertyValue -InputObject $safety -Name 'allowPendingReboot'
             maxPreflightAgeMinutes = Get-OptionalPropertyValue -InputObject $safety -Name 'maxPreflightAgeMinutes'
@@ -835,6 +836,9 @@ function Get-SafetyEvidence {
         'ExpectedSourceUserPrincipalName',
         'ExpectedUserPrincipalName',
         'ExpectedProfilePath',
+        'ExpectedComputerName',
+        'IntuneManagementNameSuffix',
+        'ExpectedIntuneManagementName',
         'RecoveryAccountName',
         'PpkgPath',
         'PpkgSha256',
@@ -865,6 +869,12 @@ function Get-SafetyEvidence {
         'ManagedDeviceIdReused',
         'PrimaryUserAssignmentRequestedUtc',
         'BitLockerFinalization',
+        'IntuneManagementNameStatus',
+        'IntuneManagementNameRequestedUtc',
+        'IntuneManagementNameVerifiedUtc',
+        'ObservedIntuneDeviceName',
+        'ObservedIntuneManagementName',
+        'IntuneManagementNameWarning',
         'CompleteUtc',
         'RecoveryRequiredUtc',
         'CommitAbortedUtc',
@@ -1463,7 +1473,7 @@ function Get-GraphEvidence {
 
     foreach ($id in @($managedDeviceIds)) {
         try {
-            $uri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$id?`$select=id,deviceName,managementAgent,enrolledDateTime,lastSyncDateTime,operatingSystem,azureADDeviceId,serialNumber"
+            $uri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$id?`$select=id,deviceName,managedDeviceName,managementAgent,enrolledDateTime,lastSyncDateTime,operatingSystem,azureADDeviceId,serialNumber"
             $managed = Invoke-GraphGet -Uri $uri -Headers $session.headers
 
             $primaryUsers = @()
@@ -1489,6 +1499,7 @@ function Get-GraphEvidence {
                     found = $true
                     id = [string]$managed.id
                     deviceName = [string]$managed.deviceName
+                    managedDeviceName = [string]$managed.managedDeviceName
                     managementAgent = [string]$managed.managementAgent
                     enrolledDateTime = [string]$managed.enrolledDateTime
                     lastSyncDateTime = [string]$managed.lastSyncDateTime
@@ -1762,6 +1773,35 @@ function Add-BeforeChecks {
         Add-ValidationCheck -Id 'source.identityIntentConfigured' -Status FAIL -Message 'config safety.expectedSourceUserPrincipalName must contain the intended synchronized user UPN.' -Evidence $expectedSourceUpn
     }
 
+    $managementNameSuffix = [string](
+        Get-OptionalPropertyValue `
+            -InputObject $Context.sourceArtifacts.config.safety `
+            -Name 'intuneManagementNameSuffix'
+    )
+
+    $normalizedSuffix = $managementNameSuffix.Trim().Trim('.').ToLowerInvariant()
+    $suffixLabels = if ([string]::IsNullOrWhiteSpace($normalizedSuffix)) { @() } else { @($normalizedSuffix.Split('.')) }
+    $suffixValid = $suffixLabels.Count -ge 2
+    foreach ($label in $suffixLabels) {
+        if (
+            [string]::IsNullOrWhiteSpace($label) -or
+            $label.Length -gt 63 -or
+            $label -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+        ) {
+            $suffixValid = $false
+        }
+    }
+
+    if ($suffixValid) {
+        $expectedManagementName = "$($Context.system.computerName).$normalizedSuffix"
+        Add-ValidationCheck -Id 'source.intuneManagementNameConfigured' -Status PASS -Message 'A DNS-style Intune management-name suffix is explicitly configured.' -Evidence $expectedManagementName
+    }
+    else {
+        Add-ValidationCheck -Id 'source.intuneManagementNameConfigured' -Status FAIL -Message 'config safety.intuneManagementNameSuffix must be a DNS-style suffix such as domain.tld.' -Evidence $managementNameSuffix
+    }
+
+    Add-ValidationCheck -Id 'source.ppkgComputerNameContract' -Status INFO -Message 'NG PPKG build contract requires ComputerName customization to be omitted; the binary PPKG is hash-pinned but this harness does not claim to introspect that customization.' -Evidence $Context.sourceArtifacts.config.safety.ppkgSha256
+
     $packages = @($Context.sourceArtifacts.provisioningPackages)
     if ($packages.Count -eq 1) {
         $expectedHash = [string](Get-OptionalPropertyValue -InputObject $Context.sourceArtifacts.config.safety -Name 'ppkgSha256')
@@ -1892,6 +1932,9 @@ function Add-AfterChecks {
     $expectedUserId = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedUserObjectId')
     $expectedSourceUpn = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedSourceUserPrincipalName')
     $expectedUpn = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedUserPrincipalName')
+    $expectedComputerName = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedComputerName')
+    $expectedManagementName = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'ExpectedIntuneManagementName')
+    $managementNameStatus = [string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'IntuneManagementNameStatus')
 
     if ($Context.execution.isAdministrator -or $Context.execution.isSystem) {
         Add-ValidationCheck -Id 'execution.admin' -Status PASS -Message 'Harness has administrative read access.' -Evidence $Context.execution.identity
@@ -1909,6 +1952,16 @@ function Add-AfterChecks {
     }
     else {
         Add-ValidationCheck -Id 'after.identityIntentContinuity' -Status FAIL -Message 'Persisted source-user intent and resolved expected Entra UPN are missing or inconsistent.' -Evidence "Intent=$expectedSourceUpn; Resolved=$expectedUpn"
+    }
+
+    if (
+        -not [string]::IsNullOrWhiteSpace($expectedComputerName) -and
+        [string]$Context.system.computerName -ieq $expectedComputerName
+    ) {
+        Add-ValidationCheck -Id 'after.physicalHostnamePreserved' -Status PASS -Message 'Physical Windows hostname matches the preflight-pinned value.' -Evidence $expectedComputerName
+    }
+    else {
+        Add-ValidationCheck -Id 'after.physicalHostnamePreserved' -Status FAIL -Message 'Physical Windows hostname preservation could not be proven.' -Evidence "Expected=$expectedComputerName; Observed=$($Context.system.computerName)"
     }
 
     if (-not $Context.migrationSafety.present) {
@@ -2067,6 +2120,30 @@ function Add-AfterChecks {
             }
             else {
                 Add-ValidationCheck -Id 'after.intunePostCommitSync' -Status FAIL -Message 'A post-commit Intune sync timestamp could not be proven.' -Evidence ([string]$currentManaged[0].lastSyncDateTime)
+            }
+
+            if (
+                -not [string]::IsNullOrWhiteSpace($expectedManagementName) -and
+                [string]$currentManaged[0].managedDeviceName -ieq $expectedManagementName
+            ) {
+                Add-ValidationCheck -Id 'after.intuneManagementName' -Status PASS -Message 'Intune managedDeviceName matches the configured post-migration administrative name.' -Evidence $expectedManagementName
+            }
+            else {
+                Add-ValidationCheck -Id 'after.intuneManagementName' -Status WARN -Message 'Intune managedDeviceName does not match the configured administrative name.' -Evidence "Expected=$expectedManagementName; Observed=$([string]$currentManaged[0].managedDeviceName); FinalizerStatus=$managementNameStatus"
+            }
+
+            if ([string]$currentManaged[0].deviceName -ieq $expectedComputerName) {
+                Add-ValidationCheck -Id 'after.intuneDeviceNamePreserved' -Status PASS -Message 'Intune deviceName agrees with the preserved physical Windows hostname.' -Evidence $expectedComputerName
+            }
+            else {
+                Add-ValidationCheck -Id 'after.intuneDeviceNamePreserved' -Status WARN -Message 'Intune deviceName does not currently agree with the preserved physical Windows hostname.' -Evidence "Physical=$expectedComputerName; IntuneDeviceName=$([string]$currentManaged[0].deviceName)"
+            }
+
+            if ($managementNameStatus -eq 'Verified') {
+                Add-ValidationCheck -Id 'after.intuneManagementNameFinalizerStatus' -Status PASS -Message 'Finalizer recorded verified Intune management-name read-back.' -Evidence ([string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'IntuneManagementNameVerifiedUtc'))
+            }
+            else {
+                Add-ValidationCheck -Id 'after.intuneManagementNameFinalizerStatus' -Status WARN -Message 'Finalizer did not record verified Intune management-name classification; core migration may still be Complete.' -Evidence ([string](Get-OptionalPropertyValue -InputObject $safetyValues -Name 'IntuneManagementNameWarning'))
             }
 
             $expectedPrimary = @(
@@ -2466,6 +2543,33 @@ function New-ValidationComparison {
         -Status INFO `
         -Message 'Observed Intune managedDevice identifier lifecycle is recorded for same-tenant behavior characterization.' `
         -Evidence "$beforeManagedId -> $afterManagedId"
+
+    $afterExpectedManagementName = [string](Get-OptionalPropertyValue -InputObject $afterSafety -Name 'ExpectedIntuneManagementName')
+    $afterManagedRecord = @(
+        $after.evidence.graph.managedDevices |
+            Where-Object {
+                $_.found -eq $true -and
+                ([string]$_.id -ieq [string]$afterManagedId)
+            }
+    ) | Select-Object -First 1
+
+    $observedAfterManagementName = if ($afterManagedRecord) {
+        [string]$afterManagedRecord.managedDeviceName
+    }
+    else {
+        $null
+    }
+
+    if (
+        $afterManagedRecord -and
+        -not [string]::IsNullOrWhiteSpace($afterExpectedManagementName) -and
+        $observedAfterManagementName -ieq $afterExpectedManagementName
+    ) {
+        Add-ComparisonCheck -Id 'compare.intuneManagementName' -Status PASS -Message 'After snapshot observes the expected Intune administrative management name.' -Evidence $afterExpectedManagementName
+    }
+    else {
+        Add-ComparisonCheck -Id 'compare.intuneManagementName' -Status WARN -Message 'Expected Intune administrative management name was not independently observed in the After snapshot.' -Evidence "Expected=$afterExpectedManagementName; Observed=$observedAfterManagementName"
+    }
 
     if ([string]$before.overallStatus -eq 'PASS') {
         Add-ComparisonCheck -Id 'compare.beforeStatus' -Status PASS -Message 'Before snapshot independently reports PASS.' -Evidence $before.capturedUtc

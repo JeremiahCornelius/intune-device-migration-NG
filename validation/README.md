@@ -1,4 +1,4 @@
-# Lab validation harness v0.1.1
+# Lab validation harness v0.1.2
 
 `Invoke-MigrationValidation.ps1` is the read-only evidence harness for destructive lab qualification of `intune-device-migration-NG`.
 
@@ -25,6 +25,12 @@ Run this from an elevated **64-bit Windows PowerShell 5.1** session while the in
 The two manual-validation switches are assertions, not automated tests. Supply them only after actually testing the local recovery credential and the full-device recovery/snapshot method. If omitted, the harness records explicit warnings.
 
 The output should be copied off-host before destructive commit.
+
+### NG provisioning-package naming requirement
+
+The NG lab provisioning package must **omit all `ComputerName` customization**. The existing Windows computer name is a preservation invariant and must not be changed by the PPKG. Acquire the bulk Microsoft Entra token using the supported Windows Configuration Designer workflow, then use/switch to the Advanced provisioning editor and confirm the final customization set does not define a computer-name value before building and hash-pinning the `.ppkg`.
+
+The migration uses the writable Intune `managedDeviceName` property for the post-migration administrative label instead. With `safety.intuneManagementNameSuffix` set to `domain.tld`, a device whose physical hostname is `W11-LAPTOP07` is expected to retain that hostname while Intune reports the management name `W11-LAPTOP07.domain.tld`.
 
 ### After
 
@@ -69,6 +75,8 @@ If Graph access is intentionally unavailable, `-SkipGraph` permits endpoint-only
 - old AD profile ownership no longer enumerating;
 - observed Entra DeviceId lifecycle;
 - observed Intune managedDevice ID lifecycle;
+- physical Windows hostname preservation;
+- expected Intune `managedDeviceName` observation;
 - the independent result of the After snapshot.
 
 ## Exit codes
@@ -91,6 +99,7 @@ The harness records:
 - `dsregcmd /status` device state;
 - interactive source identity, local/domain classification, and profile path;
 - configured `safety.expectedSourceUserPrincipalName` operator intent and its match to SID-resolved Entra UPN;
+- configured `safety.intuneManagementNameSuffix`, preflight-pinned physical hostname, and expected Intune management name;
 - relevant old/new `Win32_UserProfile` ownership;
 - Intune MDM certificate metadata;
 - local Intune enrollment IDs;
@@ -106,7 +115,7 @@ The harness records:
 - staged `config.json`, PPKG and user-probe residue;
 - config/PPKG/manifest SHA-256 evidence;
 - Microsoft Entra user/device observations;
-- Intune managedDevice correlation, sync metadata, and observable primary users.
+- Intune managedDevice correlation, sync metadata, observable primary users, `deviceName`, and `managedDeviceName` read-back.
 
 Old cloud objects are reported rather than failed in v0.1 because server-side cleanup is intentionally deferred until same-tenant lifecycle behavior is established by lab evidence.
 

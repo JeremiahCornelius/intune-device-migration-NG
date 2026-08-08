@@ -24,7 +24,7 @@
     different Entra identity and having that SID applied to the existing profile.
 
 .NOTES
-    Safety-first fork revision: 2026.08.07.4
+    Safety-first fork revision: 2026.08.08.1
 #>
 
 [CmdletBinding()]
@@ -91,6 +91,47 @@ try {
     if ($expectedSourceUpn -notmatch '^[^@\s]+@[^@\s]+$') {
         throw "config safety.expectedSourceUserPrincipalName '$expectedSourceUpn' is not in user@domain form."
     }
+
+    # Preserve the physical Windows computer name across the migration.  The
+    # separately writable Intune managedDeviceName is used only as an
+    # administrative classification label after verified re-enrollment.
+    $managementNameSuffix = [string](
+        Get-OptionalPropertyValue `
+            -InputObject $safety `
+            -Name 'intuneManagementNameSuffix'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($managementNameSuffix)) {
+        throw 'config safety.intuneManagementNameSuffix is required.'
+    }
+
+    $managementNameSuffix = $managementNameSuffix.Trim().Trim('.').ToLowerInvariant()
+    $suffixLabels = @($managementNameSuffix.Split('.'))
+    if ($suffixLabels.Count -lt 2) {
+        throw "config safety.intuneManagementNameSuffix '$managementNameSuffix' must be a DNS-style suffix such as domain.tld."
+    }
+
+    foreach ($label in $suffixLabels) {
+        if (
+            [string]::IsNullOrWhiteSpace($label) -or
+            $label.Length -gt 63 -or
+            $label -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+        ) {
+            throw "config safety.intuneManagementNameSuffix '$managementNameSuffix' contains invalid DNS label '$label'."
+        }
+    }
+
+    $expectedComputerName = [string]$env:COMPUTERNAME
+    if ([string]::IsNullOrWhiteSpace($expectedComputerName)) {
+        throw 'Windows did not provide a current physical computer name.'
+    }
+
+    $expectedIntuneManagementName = "$expectedComputerName.$managementNameSuffix"
+    if ($expectedIntuneManagementName.Length -gt 253) {
+        throw "Expected Intune management name '$expectedIntuneManagementName' exceeds the DNS FQDN length convention."
+    }
+
+    Write-MigrationLog OK "Physical hostname preservation pinned: '$expectedComputerName'; expected Intune management name: '$expectedIntuneManagementName'."
 
     $localPath = [string]$config.localPath
 
@@ -299,6 +340,9 @@ try {
         ExpectedSourceUserPrincipalName = $expectedSourceUpn
         ExpectedUserPrincipalName = $entraUser.UserPrincipalName
         ExpectedProfilePath = $interactiveUser.ProfilePath
+        ExpectedComputerName = $expectedComputerName
+        IntuneManagementNameSuffix = $managementNameSuffix
+        ExpectedIntuneManagementName = $expectedIntuneManagementName
         RecoveryAccountName = $recoveryAccount.Name
         PpkgPath = $ppkg.FullName
         PpkgSha256 = $ppkgHash
@@ -315,6 +359,9 @@ try {
         configSha256 = $configHash
         device = [ordered]@{
             computerName = $env:COMPUTERNAME
+            expectedComputerName = $expectedComputerName
+            intuneManagementNameSuffix = $managementNameSuffix
+            expectedIntuneManagementName = $expectedIntuneManagementName
             azureAdJoined = $dsreg.AzureAdJoined
             domainJoined = $dsreg.DomainJoined
             tenantId = $dsreg.TenantId

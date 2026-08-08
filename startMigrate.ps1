@@ -35,6 +35,8 @@
       8. Remove only LOCAL Intune enrollment artifacts needed to permit the new
          enrollment. Server-side Intune and Autopilot objects are retained.
       9. Apply the pinned provisioning package using Install-ProvisioningPackage.
+         NG provisioning packages must omit ComputerName customization so the
+         existing physical Windows hostname is preserved.
      10. Write the Intune detection marker only after provisioning succeeds.
      11. Request the first reboot. reboot.ps1 performs the separately hardened
          and verified Win32_UserProfile.ChangeOwner transition.
@@ -70,7 +72,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ControllerRevision = '2026.08.07.3'
+$script:ControllerRevision = '2026.08.08.1'
 $script:IrreversibleBoundaryCrossed = $false
 $script:TranscriptStarted = $false
 $script:RegisteredTaskNames = @()
@@ -299,6 +301,9 @@ function Get-SafetyStateRequired {
         'ExpectedUserObjectId',
         'ExpectedUserPrincipalName',
         'ExpectedProfilePath',
+        'ExpectedComputerName',
+        'IntuneManagementNameSuffix',
+        'ExpectedIntuneManagementName',
         'RecoveryAccountName',
         'PpkgSha256'
     )) {
@@ -879,6 +884,11 @@ try {
     }
     Write-ControllerLog OK 'config.json SHA-256 still matches preflight evidence.'
 
+    if ([string]$env:COMPUTERNAME -ine [string]$safetyState.ExpectedComputerName) {
+        throw "Physical Windows hostname changed after preflight. Expected '$($safetyState.ExpectedComputerName)'; observed '$env:COMPUTERNAME'."
+    }
+    Write-ControllerLog OK "Physical Windows hostname remains '$env:COMPUTERNAME'."
+
     $dsreg = Get-DsRegState
     if ($dsreg.AzureAdJoined -ne 'YES' -or $dsreg.DomainJoined -ne 'YES') {
         throw "Source join state changed after preflight. Expected AzureAdJoined=YES and DomainJoined=YES; observed AzureAdJoined=$($dsreg.AzureAdJoined), DomainJoined=$($dsreg.DomainJoined)."
@@ -1035,6 +1045,13 @@ try {
         -PackagePath $stagedPpkg.FullName `
         -ExpectedSha256 $stagedPpkgHash `
         -LogDirectory $provisioningLogs
+
+    # The NG PPKG build contract forbids ComputerName customization.  This
+    # immediate check catches any rename that has already become visible; the
+    # post-migration finalizer performs the authoritative post-reboot check.
+    if ([string]$env:COMPUTERNAME -ine [string]$safetyState.ExpectedComputerName) {
+        throw "Provisioning unexpectedly changed the physical Windows hostname from '$($safetyState.ExpectedComputerName)' to '$env:COMPUTERNAME'."
+    }
 
     Set-MigrationSafetyState -Values @{
         State = 'CommitStarted'
