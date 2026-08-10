@@ -7,52 +7,93 @@
 
 ## Decision
 
-The first destructive migration must not be authorized merely because a device received a payload or passed preflight. Authorization is a separate operator-controlled transaction with three explicit states:
+Atomic 0010 introduces an explicit operator-controlled authorization boundary between a cryptographically verified atomic 0009 execution bundle and the later destructive migration runbook.
+
+The controller implements three deliberately separate actions:
 
 ```text
-STAGE  →  REVIEW  →  COMMIT
+Stage  →  Review  →  Commit
 ```
 
-Atomic 0010 adds an operator-side Windows PowerShell controller that binds one independently verified atomic 0009 execution bundle to one exact Microsoft Entra device object and advances only the migration authorization group lifecycle.
+None of these actions starts migration.
 
-It does **not** start migration.
+- **Stage** classifies one exact pre-migration Entra device object as prepared/qualified.
+- **Review** performs a read-only revalidation of bundle, device, group, and membership identity and produces a hash-bound one-line Commit command.
+- **Commit** records explicit operator authorization by adding the exact same pre-migration Entra device object to the COMMIT security group while preserving STAGE membership.
 
-## Group lifecycle
+`MIGRATION-SUCCESS` remains outside atomic 0010. SUCCESS means a later, separately verified post-migration outcome; it must not be confused with authorization to attempt migration.
 
-The production lifecycle groups are fixed for this atomic:
+## Why this boundary is required
 
-| State | Group | Object ID |
-| --- | --- | --- |
-| STAGE | `PROD-EN-ENTRA-MIGRATION-STAGE` | `c3b4a23d-2d81-424c-a0b2-4e5add86a7a8` |
-| COMMIT | `PROD-EN-ENTRA-MIGRATION-COMMIT` | `7eeb1496-bdf4-4cf6-b5ac-2494cbb4c462` |
-| SUCCESS | `PROD-EN-ENTRA-MIGRATION-SUCCESS` | `093f5a96-eeb0-48bd-b9b7-05b975d8c287` |
+Atomic 0009 proves which bytes are eligible to execute. It does not answer a different control question:
 
-The controller requires all three objects to be static, non-mail-enabled security groups with the exact expected names. Role-assignable or dynamic groups are rejected.
+> Which exact device has a human operator reviewed and explicitly authorized to cross the destructive migration boundary using this exact bundle?
 
-SUCCESS remains read-only in 0010. No endpoint or operator-side automatic SUCCESS mutation is introduced.
+A migration controller that automatically infers authorization from configuration, device name, a broad Intune assignment, or mere STAGE membership would collapse preparation and destructive intent into one state.
 
-## Exact device identity
+Atomic 0010 instead makes the authorization transition explicit, attributable, reviewable, and independently verifiable.
 
-The operator supplies the Microsoft Entra **DeviceId** GUID, normally recorded from source-device `dsregcmd /status` output.
+## Lifecycle groups
 
-The controller does not authorize by hostname, display name, Intune managed-device name, user principal name, or fuzzy search.
-
-It resolves:
+The production authorization groups are:
 
 ```text
-GET /v1.0/devices(deviceId='{deviceId}')
+PROD-EN-ENTRA-MIGRATION-STAGE
+  c3b4a23d-2d81-424c-a0b2-4e5add86a7a8
+
+PROD-EN-ENTRA-MIGRATION-COMMIT
+  7eeb1496-bdf4-4cf6-b5ac-2494cbb4c462
+
+PROD-EN-ENTRA-MIGRATION-SUCCESS
+  093f5a96-eeb0-48bd-b9b7-05b975d8c287
 ```
 
-and records both:
+Atomic 0010 reads and writes only STAGE and COMMIT. It never reads SUCCESS as authorization and never changes SUCCESS membership.
 
-- `deviceId` — the Entra device registration identifier;
-- `id` — the Entra directory object identifier used for group membership.
+The authorized object is the **pre-migration Entra device directory object**. The controller does not predict which post-migration Entra or Intune objects will later exist.
 
-Before Stage, Review, and Commit, the object must still be enabled and have `trustType = ServerAd`, the Entra representation of an on-premises domain-joined device joined to Entra.
+STAGE membership is intentionally preserved after Commit. It remains historical evidence that the object passed the preparation boundary; COMMIT is an additional explicit authorization classification rather than a move operation.
 
-## Microsoft Graph permission boundary
+## Exact target-device identity
 
-0010 uses delegated operator authentication only.
+Stage requires all of the following:
+
+1. exact tenant GUID;
+2. exact Entra `deviceId` GUID, normally obtained from `dsregcmd /status` on the source host;
+3. exact expected device display name, normally the physical Windows computer name;
+4. exact STAGE group object ID and expected display name;
+5. exact COMMIT group object ID and expected display name.
+
+The controller resolves the device through the Graph `deviceId` alternate-key route and records the returned directory object ID. It then requires:
+
+- returned `deviceId` equals the requested GUID;
+- returned display name exactly equals the operator-supplied expected display name;
+- `operatingSystem` is Windows;
+- `trustType` is `ServerAd`, the Graph value representing an on-premises domain-joined device joined to Microsoft Entra ID;
+- the device object is enabled.
+
+Review and Commit subsequently resolve by the recorded **directory object ID** and reassert the complete source-device invariant immediately before proceeding: object ID, `deviceId`, exact display name, Windows operating system, `trustType = ServerAd`, and enabled state must all still match the Stage authorization context.
+
+This avoids using display name as the primary identity key while retaining it as an independent human-readable check and prevents authorization from continuing after a meaningful source-device state change.
+
+## Group safety contract
+
+Both STAGE and COMMIT must read back as:
+
+- the exact requested object ID;
+- the exact expected display name;
+- `securityEnabled = true`;
+- `mailEnabled = false`;
+- empty `groupTypes` collection;
+- `isAssignableToRole = false`.
+
+If the controller cannot positively read `isAssignableToRole`, it fails closed.
+
+This deliberately excludes dynamic groups, Microsoft 365 groups, mail-enabled groups, and role-assignable groups from the authorization workflow.
+
+## Graph permission model
+
+The controller uses delegated, operator-interactive Microsoft Graph authentication through `Microsoft.Graph.Authentication`.
 
 Required delegated scopes:
 
@@ -61,181 +102,258 @@ Device.Read.All
 GroupMember.ReadWrite.All
 ```
 
-For a **device** member, current Microsoft Graph documentation identifies those as the least-privileged delegated permissions for `POST /groups/{group-id}/members/$ref`.
+The controller requests a fresh process-scoped context for every Stage, Review, and Commit action and validates the tenant, delegated auth type, signed-in operator account, and required scopes.
 
-The signed-in user must also have a supported Entra role for the group membership update. For security groups, Microsoft documents Intune Administrator as a supported role.
+No Graph application client secret from the migration bundle is used by atomic 0010.
 
-The controller does not use application credentials, client secrets, `Directory.ReadWrite.All`, or endpoint-resident group-write authority.
+For a device member, Microsoft documents `GroupMember.ReadWrite.All` plus `Device.Read.All` as the least-privileged delegated Graph permissions for adding the device to a group. The signed-in user must also hold a supported Entra role or custom role permission for membership updates; Microsoft documents Intune Administrator as supported for security groups.
 
-## Bundle trust boundary
+Atomic 0010 therefore does not require `Group.ReadWrite.All`, `Directory.ReadWrite.All`, `Device.ReadWrite.All`, or role-management permissions.
 
-Before every action, the controller invokes atomic 0009's independent verifier in a separate Windows PowerShell 5.1 process.
+## 0009 bundle binding
 
-Authorization stops if the bundle no longer verifies.
-
-The controller additionally rejects the deliberately synthetic 0009 functional-test form when:
+Before **every** action the controller independently invokes:
 
 ```text
-functionalTestOnly = true
+lab/Test-NGLabExecutionBundle.ps1
 ```
 
-or the source tenant / expected source UPN uses the reserved `.invalid` namespace.
+The verified bundle must have been built from the exact commit and tree of the controller's current clean `main` checkout.
 
-This prevents the inert 0009 functional-validation bundle from becoming an operational migration authorization input.
+The controller records:
 
-## Controller provenance
+- BundleId;
+- manifest SHA-256;
+- repository commit/tree;
+- source tenant name from the bundled config;
+- expected source-user UPN from the bundled config;
+- Intune management-name suffix;
+- pinned PPKG SHA-256.
 
-The controller itself fails closed unless it is executed from:
+Only those non-secret review fields are copied into authorization evidence. The config itself, Graph client secret, and provisioning-package material remain in the protected 0009 bundle.
 
-- the NG repository;
-- branch `main`;
-- a clean tracked worktree;
-- the expected GitHub origin;
-- a version of the controller tracked at `HEAD`.
+Because atomic 0011 will change repository HEAD after 0010, the real destructive-lab execution bundle must be built **after the final prerequisite commit** and before Stage. An older 0009 functional-test bundle is not acceptable operational input.
 
-Evidence records controller repository commit/tree, controller Git blob ID and SHA-256, and the SHA-256 of the 0009 bundle verifier used for that action.
+## Repository provenance
 
-## STAGE
+The controller fails closed unless:
 
-STAGE is the first mutation boundary.
+1. Git is available;
+2. `RepositoryRoot` is the Git top level;
+3. origin is `JeremiahCornelius/intune-device-migration-NG`;
+4. branch is `main`;
+5. tracked files are clean;
+6. the controller and atomic 0009 verifier are tracked at HEAD.
 
-Before mutation the controller:
+Atomic 0009 functional observation `0009-F01` showed that using `$PSScriptRoot` in a parameter-default expression can be unreliable under a child `powershell.exe -File` invocation. Atomic 0010 therefore does not use that pattern: an omitted repository root is resolved in the script body, and the Review-generated Commit command supplies `-RepositoryRoot` explicitly.
 
-1. verifies controller provenance;
-2. verifies the atomic 0009 bundle;
-3. rejects synthetic functional-test input;
-4. authenticates to the exact tenant;
-5. resolves the exact Entra device by `deviceId`;
-6. requires `ServerAd` and enabled state;
-7. validates STAGE, COMMIT, and SUCCESS group identity/type;
-8. reads current **direct** group membership;
-9. refuses devices already in COMMIT or SUCCESS;
-10. creates a protected evidence directory;
-11. writes and hashes `STAGE-INTENT.json` before group mutation.
+## Evidence chain
 
-It then adds the exact Entra device directory object to STAGE if it is not already a direct member and requires read-back confirmation.
+Authorization evidence lives outside both Git and the execution bundle.
 
-A successful Stage writes:
+After all read-only Stage gates pass, but before any possible membership write, Stage creates a previously nonexistent evidence directory and ACL-restricts it to:
 
 ```text
-STAGE-INTENT.json
-STAGE-INTENT.json.sha256
-STAGE.json
-STAGE.json.sha256
+Stage operator SID
+NT AUTHORITY\SYSTEM
+BUILTIN\Administrators
 ```
 
-An already-direct STAGE member may be captured as `AlreadyDirectMember`; COMMIT and SUCCESS still cause hard failure.
-
-## REVIEW
-
-REVIEW is deliberately read-only.
-
-The controller:
-
-1. re-verifies the 0009 bundle;
-2. verifies the `STAGE.json` sidecar and JSON;
-3. re-resolves the same Entra device;
-4. revalidates tenant, device object ID, DeviceId, BundleId, and group IDs;
-5. requires direct STAGE membership;
-6. requires absence from COMMIT and SUCCESS;
-7. writes and hashes `REVIEW.json`;
-8. computes a SHA-256 approval token bound to the Stage evidence, exact device, bundle, tenant, and group IDs;
-9. prints the exact Commit command.
-
-No Graph mutation occurs during Review.
-
-The operator must manually inspect the displayed identity and evidence before running Commit.
-
-## COMMIT
-
-COMMIT is the explicit authorization mutation.
-
-The controller repeats all material trust checks and additionally requires:
-
-- valid Stage evidence;
-- valid Review evidence;
-- Review bound to the current Stage evidence SHA-256;
-- the exact approval token printed by Review;
-- direct STAGE membership;
-- absence from COMMIT and SUCCESS.
-
-Before Graph mutation it writes and hashes:
+The controller creates:
 
 ```text
-COMMIT-INTENT.json
-COMMIT-INTENT.json.sha256
+STAGE-RECORD.json
+STAGE-RECORD.sha256
+
+REVIEW-RECORD.json
+REVIEW-RECORD.sha256
+
+COMMIT-RECORD.json
+COMMIT-RECORD.sha256
 ```
 
-It then adds the exact same Entra device directory object to COMMIT and requires fresh membership read-back proving both STAGE and COMMIT remain directly present and SUCCESS is absent.
+Each JSON record is UTF-8 without BOM. Each sidecar protects the complete serialized record.
 
-A successful Commit writes:
+The hash chain is:
 
 ```text
-COMMIT.json
-COMMIT.json.sha256
+STAGE-RECORD.json
+      ↓ SHA-256 recorded by Review
+REVIEW-RECORD.json
+      ↓ SHA-256 recorded by Commit
+COMMIT-RECORD.json
 ```
 
-COMMIT means **authorized to cross the migration boundary under the atomic 0011 runbook**. It does not itself cross that boundary.
-
-## Fail-closed duplicate Commit behavior
-
-If the device is already a direct COMMIT member when the controller enters the Commit action, 0010 refuses to infer why.
-
-This can mean:
-
-- a previous Commit succeeded but local evidence writing failed;
-- an operator manually added membership;
-- another controller instance acted;
-- the device is in an unexpected lifecycle state.
-
-0010 stops for manual reconciliation rather than hiding that ambiguity with automatic idempotence.
-
-## Evidence and ACLs
-
-Default evidence root:
+Commit additionally records the Stage record SHA-256 and the three explicit operator confirmations:
 
 ```text
-%USERPROFILE%\NG-Migration-Authorization
+Review record SHA-256
+BundleId
+Entra device object ID
 ```
 
-Each Stage creates a unique child directory based on UTC time, DeviceId, and a new authorization GUID.
+Evidence files are never overwritten by the controller.
 
-The directory ACL is restricted to:
+## Stage semantics
 
-- current Windows identity;
-- `NT AUTHORITY\SYSTEM`;
-- local Administrators.
+Required pre-state:
 
-Every JSON evidence file has a SHA-256 sidecar. Later states verify earlier sidecars and embed earlier hashes, providing a simple evidence chain.
+```text
+COMMIT = false
+```
 
-Evidence intentionally contains identifiers, hashes, group state, Graph operator identity, and controller provenance. It does not contain Graph access tokens, client secrets, BPRTs, BitLocker recovery passwords, or bundled configuration contents.
+STAGE may be either false or true:
+
+- if false, the controller adds direct STAGE membership;
+- if already true, Stage records `AlreadyPresent` after all other identity gates succeed.
+
+Required post-state:
+
+```text
+STAGE  = true
+COMMIT = false
+```
+
+A device already in COMMIT is rejected. Stage will not back-fill authorization evidence for an object that has previously crossed the boundary.
+
+Stage does not run preflight and does not modify endpoint state.
+
+## Review semantics
+
+Review requires valid Stage evidence and a live state of:
+
+```text
+STAGE  = true
+COMMIT = false
+```
+
+Review performs no Graph write.
+
+It prints the exact values the human operator must inspect, including:
+
+- tenant;
+- operator;
+- device display name;
+- deviceId;
+- Entra directory object ID;
+- BundleId;
+- manifest SHA-256;
+- expected source-user UPN;
+- source tenant name;
+- PPKG SHA-256;
+- Intune naming suffix;
+- STAGE and COMMIT group identities;
+- live membership state;
+- Review record SHA-256.
+
+Only after writing and self-verifying REVIEW-RECORD.json does the controller emit an exact one-line Commit command containing the Review record SHA-256, BundleId, and device object ID.
+
+## Commit semantics
+
+Commit requires:
+
+- a valid Stage → Review hash chain;
+- exact current bundle re-verification immediately before authorization;
+- explicit Review record SHA-256 match;
+- explicit BundleId match;
+- explicit device object ID match;
+- current live device object ID and `deviceId` match;
+- exact Stage-recorded display name still matches;
+- device remains enabled Windows with `trustType = ServerAd`;
+- current STAGE membership present;
+- current COMMIT membership absent.
+
+Commit then adds direct COMMIT membership and reads membership back until it observes:
+
+```text
+STAGE  = true
+COMMIT = true
+```
+
+Only then does it write COMMIT-RECORD.json.
+
+Commit is an **authorization event only**. It does not call `preflight.ps1`, `startMigrate.ps1`, or any migration-engine script.
+
+## Partial-failure semantics
+
+The controller deliberately prefers manual reconciliation over guessing after a cloud mutation.
+
+Examples:
+
+- If Stage membership is added but local evidence cannot be completed, a later Stage attempt will encounter existing state/evidence and require inspection rather than silently reconstructing history.
+- If COMMIT membership is added but COMMIT-RECORD.json cannot be completed, a later Commit sees COMMIT membership without a Commit record and fails closed with an explicit out-of-band/partial-record warning.
+- An existing Review or Commit record is never overwritten.
+
+Atomic 0011 will define the operator recovery/evidence runbook around these states.
+
+## Independent evidence verifier
+
+`lab/Test-NGMigrationAuthorizationEvidence.ps1` is read-only.
+
+It:
+
+- independently reruns the atomic 0009 bundle verifier;
+- verifies Stage/Review/Commit sidecars;
+- verifies the cryptographic record chain;
+- verifies bundle identity and non-secret config review fields;
+- verifies tenant, device, and group identities remain consistent across records;
+- verifies recorded state transitions;
+- verifies the evidence-directory ACL;
+- refuses evidence claiming migration or SUCCESS-group activity;
+- supports `-RequireCommit` for the final authorization gate.
+
+It does not query or modify Graph. Live Graph membership remains the controller's responsibility at each action; atomic 0011 will define the immediate pre-migration operational gate.
 
 ## Explicit exclusions
 
-Atomic 0010 does not:
+Atomic 0010 does **not**:
 
-- run `preflight.ps1`;
-- run `startMigrate.ps1`;
-- install the PPKG;
+- run migration preflight;
 - unjoin AD;
-- call `dsregcmd /leave`;
-- delete or modify Intune managed-device objects;
-- delete or rename Entra devices;
-- alter Windows hostname;
-- alter profile ownership;
-- modify BitLocker;
-- add SUCCESS membership;
-- clean stale cloud objects;
-- implement rollback or rerun automation;
-- create Win32 app packaging.
+- run `dsregcmd /leave`;
+- install a PPKG;
+- change a Windows profile owner;
+- change physical computer name;
+- modify Intune `managedDeviceName`;
+- alter BitLocker;
+- delete Entra, Intune, or Autopilot objects;
+- add or remove SUCCESS membership;
+- remove STAGE membership at Commit;
+- automatically start migration because COMMIT membership exists;
+- grant Graph permissions to the endpoint migration payload.
 
-## 0009 functional-test observation
+## CI contract
 
-The non-destructive 0009 functional test found that a child `powershell.exe -File` invocation of the bundle **builder** required explicit `-RepositoryRoot` because its default `$PSScriptRoot` expression failed during parameter binding in that launch mode.
+Atomic 0010 adds these scripts to both Windows PowerShell 5.1 parser validation and PSScriptAnalyzer:
 
-0010 does not invoke the builder. It invokes the 0009 **verifier**, which was successfully exercised through `powershell.exe -File` during the 0009 functional test.
+```text
+lab/Invoke-NGMigrationAuthorization.ps1
+lab/Test-NGMigrationAuthorizationEvidence.ps1
+```
 
-No 0009 migration-runtime modification is introduced by 0010.
+The existing `lab/**` workflow path filter already covers the new files.
+
+## Roadmap position
+
+```text
+0009  deterministic execution bundle + cryptographic manifest
+      source/static/CI PASS
+      non-destructive functional PASS
+  ↓
+0010  manual Stage → Review → Commit authorization controller
+  ↓
+0011  destructive-lab runbook + recovery/evidence gate
+  ↓
+real external config + ephemeral Graph credential + ComputerName-free PPKG
+  ↓
+build fresh deterministic bundle from final prerequisite HEAD
+  ↓
+Stage → Review → explicit Commit
+  ↓
+first destructive migration
+  ↓
+post-migration validation → compare → stop and analyze runtime evidence
+```
 
 ## Upstream provenance review
 
@@ -245,29 +363,6 @@ Refreshed before atomic 0010:
 - upstream `main`: `9effda8bd5ae042f1d837981eb07fd0b35af7c2c`
 - upstream `8.1`: `798ce006dae9ea1ac0c06e12c0345f898c102a7c`
 
-Current upstream issues continue to report identity/profile ambiguity and migrations that remove the source state but fail to complete the destination join. Those reports reinforce the NG design requirement for a separate, inspectable authorization boundary.
+Relevant upstream issues continue to demonstrate identity-transition and resume hazards, including #13, #16, #17, and #18. Issue #6 documents unreliable device-ID derivation from the organization-access certificate. Open PRs #10 and #11 address unrelated RunAsUser import and reboot-log issues.
 
-No upstream main/8.1 implementation or PR supplies an equivalent deterministic Stage → Review → Commit authorization controller to port.
-
-## Roadmap position
-
-```text
-0009  deterministic execution bundle + cryptographic manifest
-       + non-destructive functional validation PASS
-  ↓
-0010  manual Stage → Review → Commit authorization controller
-  ↓
-0011  destructive-lab runbook + recovery/evidence gate
-  ↓
-real operational config + dedicated credential + real PPKG
-  ↓
-build and verify execution bundle
-  ↓
-Stage
-  ↓
-Review
-  ↓
-explicit Commit
-  ↓
-0011 destructive migration boundary
-```
+No upstream Stage/Review/Commit authorization controller was identified for selective porting. Atomic 0010 is NG-specific and ports no upstream code.

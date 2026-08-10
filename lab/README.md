@@ -166,3 +166,94 @@ It does **not**:
 - add the device to `MIGRATION-SUCCESS`.
 
 Atomic 0010 will consume this bundle as the input to the explicit Stage → Review → Commit workflow. Atomic 0011 will define the destructive-lab runbook and recovery/evidence contract.
+
+---
+
+# Atomic 0010 — Manual Stage → Review → Commit authorization
+
+Atomic 0010 adds an operator-side authorization boundary around the verified atomic 0009 bundle. It does **not** start migration.
+
+## Committed tooling
+
+- `Invoke-NGMigrationAuthorization.ps1` — performs the explicit `Stage`, `Review`, and `Commit` authorization actions.
+- `Test-NGMigrationAuthorizationEvidence.ps1` — independently verifies the local Stage/Review/Commit evidence chain and the bound atomic 0009 execution bundle.
+
+Both scripts target Windows PowerShell 5.1 and are included in the repository parser/PSScriptAnalyzer workflow.
+
+## Authorization state
+
+```text
+STAGE  = prepared / qualified pre-migration Entra device object
+REVIEW = read-only human verification of exact device + exact bundle
+COMMIT = explicit authorization for that same object + bundle
+SUCCESS = not owned or modified by atomic 0010
+```
+
+Commit preserves STAGE membership. It does not move the object from one group to another.
+
+## Graph permissions
+
+The controller uses operator-interactive delegated Graph authentication with:
+
+```text
+Device.Read.All
+GroupMember.ReadWrite.All
+```
+
+It requests a fresh process-scoped Graph context for every action. The reusable Graph application secret contained in the current lab migration config is not used for authorization.
+
+## Required group contract
+
+STAGE and COMMIT must be normal static security groups: security enabled, not mail enabled, empty `groupTypes`, and not role assignable. The exact object IDs and exact display names are read back before any membership write.
+
+## Exact device contract
+
+Stage resolves the source by Entra `deviceId`, then requires:
+
+- exact expected display name;
+- Windows operating system;
+- `trustType = ServerAd` (hybrid joined);
+- enabled Entra device object.
+
+Review and Commit bind to the exact directory object ID returned during Stage and reassert the complete source-device invariant: object ID, `deviceId`, exact Stage-recorded display name, Windows operating system, `trustType = ServerAd`, and enabled state must all still match.
+
+## Bundle contract
+
+Before every action the controller independently runs `Test-NGLabExecutionBundle.ps1`.
+
+The bundle must match the exact commit/tree of the controller's current clean `main` checkout. Build the real operational bundle only after all prerequisite atomics are committed; an earlier 0009 functional-test fixture is not valid operational input.
+
+## Evidence contract
+
+After all read-only Stage gates pass, Stage creates a new ACL-protected external evidence directory immediately before any possible membership write. The ACL is restricted to the Stage operator SID, LocalSystem, and local Administrators with inheritable FullControl. The controller never writes evidence inside the Git checkout or inside the execution bundle.
+
+```text
+STAGE-RECORD.json
+STAGE-RECORD.sha256
+REVIEW-RECORD.json
+REVIEW-RECORD.sha256
+COMMIT-RECORD.json
+COMMIT-RECORD.sha256
+```
+
+Review hashes Stage; Commit hashes Review and also records the Stage hash. Evidence files are never overwritten.
+
+## Manual operating model
+
+The intended sequence is:
+
+```text
+1. Verify the final prerequisite repository HEAD.
+2. Build and independently verify a fresh atomic 0009 bundle.
+3. Run Stage for exactly one source device.
+4. Independently verify authorization evidence.
+5. Run Review.
+6. Inspect every printed identity and bundle field.
+7. Copy the exact one-line Commit command emitted by Review.
+8. Run Commit only when those values are correct.
+9. Independently verify evidence with -RequireCommit.
+10. STOP. Atomic 0010 has authorized migration but has not started it.
+11. Continue only under the atomic 0011 destructive-lab runbook.
+```
+
+The delivery package for atomic 0010 includes a standalone operator lab manual with exact production group IDs, paste-safe one-line commands, expected results, stop conditions, evidence checks, and partial-failure handling.
