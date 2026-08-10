@@ -153,8 +153,8 @@ function Set-NG0011RestrictedDirectoryAcl {
     if (-not $identity -or -not $identity.User) { throw 'Unable to resolve current Windows SID.' }
     $sid=[string]$identity.User.Value
     $grants=@("*$($sid):(OI)(CI)F",'*S-1-5-18:(OI)(CI)F','*S-1-5-32-544:(OI)(CI)F') | Select-Object -Unique
-    $args=@($Path,'/inheritance:r','/grant:r')+$grants+@('/T','/C')
-    & "$env:SystemRoot\System32\icacls.exe" @args | Out-Null
+    $icaclsArgs=@($Path,'/inheritance:r','/grant:r')+$grants+@('/T','/C')
+    & "$env:SystemRoot\System32\icacls.exe" @icaclsArgs | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls failed for '$Path' with exit code $LASTEXITCODE." }
     return $sid
 }
@@ -399,16 +399,16 @@ function Get-NG0011ConnectivityEvidence {
     $uris=@('https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration','https://graph.microsoft.com/v1.0/$metadata','https://enterpriseregistration.windows.net/')
     $results=[System.Collections.Generic.List[object]]::new()
     foreach($uri in $uris){
-        $reachable=$false; $status=''; $error=''
+        $reachable=$false; $status=''; $connectivityError=''
         try {
             $request=[Net.HttpWebRequest]::Create($uri); $request.Method='GET'; $request.Timeout=15000; $request.AllowAutoRedirect=$true; $request.UserAgent='NG-Atomic-0011-Gate'
             $response=$request.GetResponse(); try { $status=[string][int]$response.StatusCode; $reachable=$true } finally { $response.Close() }
         }
         catch [Net.WebException] {
             if($_.Exception.Response){ $response=$_.Exception.Response; try { $status=[string][int]$response.StatusCode; $reachable=$true } finally { $response.Close() } }
-            else { $error=$_.Exception.Message }
+            else { $connectivityError=$_.Exception.Message }
         }
-        if(-not $reachable){ throw "Required HTTPS endpoint is not reachable: '$uri'. $error" }
+        if(-not $reachable){ throw "Required HTTPS endpoint is not reachable: '$uri'. $connectivityError" }
         $results.Add([pscustomobject][ordered]@{uri=$uri;reachable=$true;httpStatus=$status})
     }
     return @($results)
@@ -454,7 +454,7 @@ namespace NG0011 {
     try {
         $passwordPtr=[Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($Credential.Password)
         $ok=[NG0011.NativeMethods]::LogonUser([string]$RecoveryAccount.Name,'.',$passwordPtr,2,0,[ref]$token)
-        if(-not $ok){ $code=[Runtime.InteropServices.Marshal]::GetLastWin32Error(); $message=(New-Object ComponentModel.Win32Exception($code)).Message; throw "Local recovery credential interactive-logon validation failed (Win32 $code: $message)." }
+        if(-not $ok){ $code=[Runtime.InteropServices.Marshal]::GetLastWin32Error(); $message=(New-Object ComponentModel.Win32Exception($code)).Message; throw "Local recovery credential interactive-logon validation failed (Win32 $($code): $message)." }
     }
     finally {
         if($token -ne [IntPtr]::Zero){ [void][NG0011.NativeMethods]::CloseHandle($token) }
