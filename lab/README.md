@@ -257,3 +257,118 @@ The intended sequence is:
 ```
 
 The delivery package for atomic 0010 includes a standalone operator lab manual with exact production group IDs, paste-safe one-line commands, expected results, stop conditions, evidence checks, and partial-failure handling.
+
+---
+
+# Atomic 0011 — destructive-lab recovery/evidence gate
+
+Committed tooling:
+
+- `NG.DestructiveLab.Common.ps1` — shared cryptographic, provenance, endpoint-readiness, ACL, recovery-credential and evidence functions.
+- `Build-NGDestructiveLabControlPackage.ps1` — binds the final bundle to complete 0010 Commit evidence and creates a non-secret control package.
+- `Invoke-NGDestructiveLabGate.ps1` — performs the final endpoint recovery/readiness gate and fresh preflight without starting migration.
+- `Test-NGDestructiveLabGateEvidence.ps1` — independently re-verifies the short-lived gate immediately before launch.
+- `Invoke-NGDestructiveLabLaunch.ps1` — the only human runbook-authorized destructive start path; requires exact explicit confirmations plus `-Execute`.
+- `Invoke-NGDestructiveLabLaunchWorker.ps1` — one-time LocalSystem worker that re-verifies Gate/Intent/bundle in task context and refuses replay before invoking `startMigrate.ps1`.
+- `Export-NGDestructiveLabEvidence.ps1` — collects a bounded evidence package while excluding known sensitive runtime inputs after success or failure.
+
+All target Windows PowerShell 5.1 and are included in repository CI.
+
+### 0011 control-package build
+
+Perform this only after atomic 0011 is committed and source/static/CI-promoted, and after building a fresh 0009 bundle from that final HEAD and completing 0010 Stage → Review → Commit for the same bundle.
+
+```powershell
+.\lab\Build-NGDestructiveLabControlPackage.ps1 `
+    -RepositoryRoot 'C:\src\intune-device-migration-NG' `
+    -BundlePath 'C:\NG-Lab-Run\Bundle-001' `
+    -AuthorizationEvidencePath 'C:\NG-Lab-Run\Authorization-001' `
+    -OutputPath 'C:\NG-Lab-Run\Control-001'
+```
+
+The control package contains no config, PPKG, recovery password, or reusable Graph secret. It is cryptographically bound to the final repository commit/tree, BundleId, and atomic 0010 Commit record.
+
+### Endpoint gate
+
+Transfer the execution bundle and control package to the exact authorized source endpoint by an approved secure method. Keep the intended source domain user signed in.
+
+Open **elevated Windows PowerShell 5.1** and run:
+
+```powershell
+& 'C:\NG-Lab-Run\Control-001\payload\Invoke-NGDestructiveLabGate.ps1' `
+    -ControlPackagePath 'C:\NG-Lab-Run\Control-001' `
+    -BundlePath 'C:\NG-Lab-Run\Bundle-001' `
+    -GateEvidencePath 'C:\ProgramData\IntuneMigrationGate'
+```
+
+The gate validates the actual local recovery password through Windows interactive-logon semantics. The password is not stored or hashed.
+
+The gate also verifies exact Hybrid source identity, BitLocker recovery-password protector availability when protection is On, AC power for battery systems, Windows time status, Microsoft endpoint reachability, and a fresh non-destructive preflight.
+
+A successful gate prints:
+
+- exact ComputerName;
+- DeviceId and TenantId;
+- expected source UPN;
+- BundleId;
+- atomic 0010 Commit-record SHA-256;
+- recovery-account proof;
+- Gate-record SHA-256;
+- gate expiration time;
+- exact independent-verifier command;
+- exact destructive-launch command.
+
+No migration has started at this point.
+
+### Independent gate verification
+
+Run the printed verifier command. It must return PASS immediately before launch.
+
+Before the destructive window, ensure `Microsoft.Graph.Authentication` is installed on the source endpoint. The explicit launcher uses a fresh process-scoped delegated `Device.Read.All` context to query the authorized device object's **direct** `memberOf` relationship immediately before Launch Intent. It requires STAGE=True, COMMIT=True, SUCCESS=False and performs no Graph write. Add `-UseDeviceCode` to the launcher command when device-code authentication is preferred.
+
+```powershell
+& 'C:\NG-Lab-Run\Control-001\payload\Test-NGDestructiveLabGateEvidence.ps1' `
+    -ControlPackagePath 'C:\NG-Lab-Run\Control-001' `
+    -BundlePath 'C:\NG-Lab-Run\Bundle-001' `
+    -GateEvidencePath 'C:\ProgramData\IntuneMigrationGate'
+```
+
+### Explicit destructive launch
+
+Only after reviewing the Gate output and verifier PASS, execute the exact command emitted by the Gate. It is bound to four explicit confirmations and requires `-Execute`.
+
+After independent Gate verification and exact human confirmations, the launcher performs the fresh delegated direct-membership check and writes its STAGE=True / COMMIT=True / SUCCESS=False proof into `LAUNCH-INTENT.json` before task creation/start. It then creates the no-trigger LocalSystem task `NG-DestructiveLab-Start` and explicitly starts it. The task invokes only the 0011 LocalSystem worker. The worker independently re-verifies the short-lived Gate, Launch Intent and bundle, requires the live lifecycle proof to be less than five minutes old, writes `SYSTEM-LAUNCH.json`, refuses replay, and then invokes the verified bundle's `startMigrate.ps1`.
+
+Do **not** manually run the task, LocalSystem worker, or `startMigrate.ps1` during the controlled lab.
+
+### Recovery state handling
+
+| Safety state | Operator interpretation |
+| --- | --- |
+| `PreflightPassed` | Destructive engine not started. Stop safely; a new attempt requires a fresh Gate. |
+| `CommitAborted` | Existing engine aborted before its irreversible boundary. Export evidence; do not auto-retry. |
+| `CommitStarted` | Identity-changing sequence has begun or is imminent. Inspect `CommitStep`; do not assume rollback. |
+| `RecoveryRequired` | Use the validated local recovery Administrator if necessary, preserve evidence, and analyze before any repair/reboot/retry. |
+| `ProfileReassociated` | Profile ownership transition was verified. Do not manually reverse it; proceed with expected Entra sign-in/finalization. |
+| `PostMigrationPending` | PRT/network/Graph/Intune verification is pending. Existing retry path remains armed; do not start another migration. |
+| `Complete` | Core post-migration finalizer succeeded. Export evidence and stop before any second device or SUCCESS classification. |
+
+### Evidence export
+
+After a terminal or diagnostically useful point, run:
+
+```powershell
+& 'C:\NG-Lab-Run\Control-001\payload\Export-NGDestructiveLabEvidence.ps1' `
+    -ControlPackagePath 'C:\NG-Lab-Run\Control-001' `
+    -BundlePath 'C:\NG-Lab-Run\Bundle-001' `
+    -GateEvidencePath 'C:\ProgramData\IntuneMigrationGate' `
+    -OutputPath 'C:\NG-Lab-Evidence\Device-001'
+```
+
+The exporter includes manifests, gate/launch evidence, dsreg state, migration Safety state, SID/profile mappings, task metadata, MDM certificate metadata, logs and selected event logs. It explicitly excludes `config.json`, `.ppkg` files, private keys, recovery passwords and Graph credentials.
+
+## Absolute first-lab stop rule
+
+After the first destructive device—success or failure—**stop**. Preserve the execution bundle, 0010 authorization evidence, 0011 control package, endpoint gate evidence and exported evidence. Analyze the complete transition before authorizing a second device.
+
+Atomic 0011 does not add the device to MIGRATION-SUCCESS and performs no server-side stale-object cleanup.

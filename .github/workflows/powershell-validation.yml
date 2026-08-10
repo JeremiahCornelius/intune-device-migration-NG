@@ -76,6 +76,13 @@ jobs:
               'lab/Test-NGLabExecutionBundle.ps1'
               'lab/Invoke-NGMigrationAuthorization.ps1'
               'lab/Test-NGMigrationAuthorizationEvidence.ps1'
+              'lab/NG.DestructiveLab.Common.ps1'
+              'lab/Build-NGDestructiveLabControlPackage.ps1'
+              'lab/Invoke-NGDestructiveLabGate.ps1'
+              'lab/Test-NGDestructiveLabGateEvidence.ps1'
+              'lab/Invoke-NGDestructiveLabLaunch.ps1'
+              'lab/Invoke-NGDestructiveLabLaunchWorker.ps1'
+              'lab/Export-NGDestructiveLabEvidence.ps1'
           )
 
           function ConvertTo-GitHubCommandValue {
@@ -210,6 +217,13 @@ jobs:
               'lab/Test-NGLabExecutionBundle.ps1'
               'lab/Invoke-NGMigrationAuthorization.ps1'
               'lab/Test-NGMigrationAuthorizationEvidence.ps1'
+              'lab/NG.DestructiveLab.Common.ps1'
+              'lab/Build-NGDestructiveLabControlPackage.ps1'
+              'lab/Invoke-NGDestructiveLabGate.ps1'
+              'lab/Test-NGDestructiveLabGateEvidence.ps1'
+              'lab/Invoke-NGDestructiveLabLaunch.ps1'
+              'lab/Invoke-NGDestructiveLabLaunchWorker.ps1'
+              'lab/Export-NGDestructiveLabEvidence.ps1'
           )
 
           $settingsPath = Join-Path `
